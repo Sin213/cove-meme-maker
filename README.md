@@ -4,8 +4,6 @@ A focused, offline meme generator for **Linux** and **Windows**. No cloud,
 no template library, no account — drop in your own image, GIF, or video,
 type some text, and export.
 
-![icon](cove_icon.png)
-
 ## Download (v1.0.0)
 
 | Platform | File |
