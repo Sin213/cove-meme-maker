@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cove-meme-maker"
+version = "1.0.0"
+description = "Offline meme maker for images, GIFs, and videos"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Cove" }]
+dependencies = [
+    "PySide6>=6.6",
+    "Pillow>=10.0",
+]
+
+[project.scripts]
+cove-meme-maker = "cove_meme_maker.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cove_meme_maker = ["assets/*.png", "assets/*.ico"]

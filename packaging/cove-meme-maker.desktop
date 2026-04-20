@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Cove Meme Maker
+GenericName=Offline Meme Generator
+Comment=Make classic and modern memes from your own images, GIFs, and videos
+Exec=cove-meme-maker
+Icon=cove-meme-maker
+Terminal=false
+Categories=Graphics;AudioVideo;Utility;
+Keywords=meme;image;gif;video;caption;impact;
+StartupNotify=true
+MimeType=image/png;image/jpeg;image/webp;video/mp4;video/x-matroska;video/webm;video/quicktime;
