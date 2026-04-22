@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import ffmpeg_utils as ff
+from . import __version__, ffmpeg_utils as ff, updater
 from . import fonts
 from .export_worker import AnimatedJob, start_animated_export, start_export
 from .timeline import TrimBar
@@ -185,7 +185,7 @@ class ColorSwatch(QPushButton):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Cove Meme Maker")
+        self.setWindowTitle(f"Cove Meme Maker v{__version__}")
         self.resize(1080, 720)
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
@@ -224,6 +224,15 @@ class MainWindow(QMainWindow):
         self._load_settings()
         self._update_controls_enabled()
         self._on_style_toggled()
+
+        self._updater = updater.UpdateController(
+            parent=self,
+            current_version=__version__,
+            repo="Sin213/cove-meme-maker",
+            app_display_name="Cove Meme Maker",
+            cache_subdir="cove-meme-maker",
+        )
+        QTimer.singleShot(4000, self._updater.check)
 
     # ------------------------------------------------------------------ UI
 
