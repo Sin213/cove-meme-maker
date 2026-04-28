@@ -1,14 +1,12 @@
 <#
 .SYNOPSIS
     Build Cove Meme Maker into a Windows Setup installer and a single-file
-    portable executable. Bundles a portable ffmpeg.exe so video input works
-    without the user installing ffmpeg separately.
+    portable executable.
 
 .DESCRIPTION
     Runs locally on Windows (PowerShell 5.1+ or PowerShell 7) and inside the
     GitHub Actions windows-latest runner. Creates a private venv, installs
-    build deps, generates the .ico from the PNG, downloads the gyan.dev
-    ffmpeg release-essentials build, then runs PyInstaller twice:
+    build deps, generates the .ico from the PNG, then runs PyInstaller twice:
       * --onedir  for the Inno Setup installer (Setup.exe)
       * --onefile for the standalone Portable.exe
 
@@ -19,7 +17,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "1.0.0"
+    [string]$Version = "2.0.0"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,19 +25,13 @@ Set-StrictMode -Version Latest
 
 $App        = "cove-meme-maker"
 $ReleaseDir = "release"
-$FfmpegUrl  = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
 function Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
-
-function Download-File([string]$url, [string]$dest) {
-    & curl.exe --silent --show-error --fail --location --output $dest $url
-    if ($LASTEXITCODE -ne 0) { throw "Download failed: $url" }
-}
 
 Step "Building $App v$Version"
 
 # --- 1. Build environment ---------------------------------------------------
-Step "[1/7] Creating build venv"
+Step "[1/5] Creating build venv"
 if (Test-Path .buildenv) { Remove-Item -Recurse -Force .buildenv }
 python -m venv .buildenv
 & .\.buildenv\Scripts\python.exe -m pip install --quiet --upgrade pip
@@ -47,7 +39,7 @@ python -m venv .buildenv
     PySide6 Pillow pyinstaller
 
 # --- 2. Generate .ico from the PNG ------------------------------------------
-Step "[2/7] Generating cove_icon.ico"
+Step "[2/5] Generating cove_icon.ico"
 & .\.buildenv\Scripts\python.exe -c @"
 from PIL import Image
 Image.open('cove_icon.png').save(
@@ -56,27 +48,8 @@ Image.open('cove_icon.png').save(
 )
 "@
 
-# --- 3. Download ffmpeg -----------------------------------------------------
-Step "[3/7] Downloading ffmpeg (gyan.dev release-essentials)"
-$ffTmp = Join-Path ([IO.Path]::GetTempPath()) ("ffmpeg-" + [Guid]::NewGuid())
-New-Item -ItemType Directory -Path $ffTmp | Out-Null
-$ffZip = Join-Path $ffTmp "ffmpeg.zip"
-Download-File $FfmpegUrl $ffZip
-Expand-Archive -Path $ffZip -DestinationPath $ffTmp -Force
-
-$ffRoot = Get-ChildItem -Path $ffTmp -Directory |
-          Where-Object { $_.Name -like 'ffmpeg-*' } |
-          Select-Object -First 1
-if (-not $ffRoot) { throw "Could not locate extracted ffmpeg folder under $ffTmp" }
-
-$ffmpegExe     = Join-Path $ffRoot.FullName "bin\ffmpeg.exe"
-$ffprobeExe    = Join-Path $ffRoot.FullName "bin\ffprobe.exe"
-$ffmpegLicense = Join-Path $ffRoot.FullName "LICENSE"
-if (-not (Test-Path $ffmpegExe))  { throw "ffmpeg.exe missing from downloaded archive" }
-if (-not (Test-Path $ffprobeExe)) { throw "ffprobe.exe missing from downloaded archive" }
-
-# --- 4. PyInstaller: one-dir (installer input) ------------------------------
-Step "[4/7] PyInstaller (one-dir for installer)"
+# --- 3. PyInstaller: one-dir (installer input) ------------------------------
+Step "[3/5] PyInstaller (one-dir for installer)"
 if (Test-Path build) { Remove-Item -Recurse -Force build }
 if (Test-Path dist)  { Remove-Item -Recurse -Force dist  }
 
@@ -98,8 +71,6 @@ $commonArgs = @(
     '--exclude-module', 'PySide6.QtMultimedia',
     '--exclude-module', 'PySide6.QtMultimediaWidgets',
     '--exclude-module', 'tkinter',
-    '--add-binary', ($ffmpegExe  + [IO.Path]::PathSeparator + '.'),
-    '--add-binary', ($ffprobeExe + [IO.Path]::PathSeparator + '.'),
     'packaging\launcher.py'
 )
 
@@ -110,12 +81,9 @@ $dirAppDir = Join-Path 'dist' $App
 Copy-Item cove_icon.png $dirAppDir -Force
 if (Test-Path README.md) { Copy-Item README.md $dirAppDir -Force }
 if (Test-Path LICENSE)   { Copy-Item LICENSE   $dirAppDir -Force }
-if (Test-Path $ffmpegLicense) {
-    Copy-Item $ffmpegLicense (Join-Path $dirAppDir "FFMPEG-LICENSE.txt") -Force
-}
 
-# --- 5. PyInstaller: one-file (portable) ------------------------------------
-Step "[5/7] PyInstaller (one-file portable)"
+# --- 4. PyInstaller: one-file (portable) ------------------------------------
+Step "[4/5] PyInstaller (one-file portable)"
 $portableName = "$App-portable"
 & .\.buildenv\Scripts\pyinstaller.exe `
     --noconfirm --clean --log-level WARN `
@@ -135,13 +103,11 @@ $portableName = "$App-portable"
     --exclude-module PySide6.QtMultimedia `
     --exclude-module PySide6.QtMultimediaWidgets `
     --exclude-module tkinter `
-    --add-binary ($ffmpegExe  + [IO.Path]::PathSeparator + '.') `
-    --add-binary ($ffprobeExe + [IO.Path]::PathSeparator + '.') `
     packaging\launcher.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller (onefile) failed" }
 
-# --- 6. Build installer + stage portable ------------------------------------
-Step "[6/7] Building Setup installer with Inno Setup"
+# --- 5. Build installer + stage portable ------------------------------------
+Step "[5/5] Building Setup installer with Inno Setup"
 New-Item -ItemType Directory -Path $ReleaseDir -Force | Out-Null
 
 $iscc = $null
@@ -177,11 +143,10 @@ $portableDest = Join-Path $ReleaseDir ("{0}-{1}-Portable.exe" -f $App, $Version)
 if (Test-Path $portableDest) { Remove-Item -Force $portableDest }
 Copy-Item $portableSrc $portableDest -Force
 
-# --- 7. Cleanup -------------------------------------------------------------
-Step "[7/7] Cleaning up"
+# --- Cleanup ----------------------------------------------------------------
+Step "Cleaning up"
 Remove-Item -Recurse -Force .buildenv, build, dist, cove_icon.ico -ErrorAction SilentlyContinue
 Get-ChildItem -Filter *.spec | Remove-Item -Force -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force $ffTmp -ErrorAction SilentlyContinue
 
 Step "Done. Artifacts:"
 Get-ChildItem $ReleaseDir | Format-Table Name, Length -AutoSize

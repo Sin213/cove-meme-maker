@@ -48,7 +48,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            binutils tar xz-utils curl libfuse2 ffmpeg
+            binutils tar xz-utils curl libfuse2
 
       - name: Install Python deps
         run: |

@@ -52,6 +52,13 @@ class MemeSpec:
     # placement" so callers that don't care about dragging keep working.
     top_pos: tuple[float, float] | None = None
     bottom_pos: tuple[float, float] | None = None
+    # Per-block size override expressed as font-size % of image height.
+    # None falls back to ``font_scale * 100``.
+    top_size_pct: float | None = None
+    bottom_size_pct: float | None = None
+    # Clockwise rotation in degrees applied around the block centre.
+    top_rotation: float = 0.0
+    bottom_rotation: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -77,69 +84,6 @@ def render_to_file(source: Image.Image | Path, spec: MemeSpec, out: Path) -> Pat
     return out
 
 
-def is_animated(img: Image.Image) -> bool:
-    return bool(getattr(img, "is_animated", False)) and getattr(img, "n_frames", 1) > 1
-
-
-def load_animation(path: Path) -> tuple[list[Image.Image], list[int]]:
-    """Return (RGB frames, per-frame durations in ms). Works for animated GIF
-    and animated WebP; raises for static images.
-    """
-    frames: list[Image.Image] = []
-    durations: list[int] = []
-    with Image.open(path) as img:
-        n = getattr(img, "n_frames", 1)
-        for i in range(n):
-            img.seek(i)
-            # .convert on the open-handle frame creates a detached copy we can
-            # keep after the context exits.
-            frames.append(img.convert("RGB"))
-            durations.append(int(img.info.get("duration", 100) or 100))
-    return frames, durations
-
-
-def render_sequence(frames: list[Image.Image], spec: MemeSpec) -> list[Image.Image]:
-    return [render(frame, spec) for frame in frames]
-
-
-def save_animation(
-    frames: list[Image.Image],
-    durations: list[int],
-    out: Path,
-    *,
-    fmt: str = "gif",
-    loop: int = 0,
-) -> Path:
-    if not frames:
-        raise ValueError("no frames to save")
-    fmt = fmt.lower()
-    if fmt == "gif":
-        # Pillow's GIF writer picks a decent adaptive palette per frame when
-        # the source has alpha / mixed content, at the cost of some dithering.
-        frames[0].save(
-            out,
-            save_all=True,
-            append_images=frames[1:],
-            duration=durations,
-            loop=loop,
-            optimize=True,
-            disposal=2,
-        )
-    elif fmt == "webp":
-        frames[0].save(
-            out,
-            save_all=True,
-            append_images=frames[1:],
-            duration=durations,
-            loop=loop,
-            quality=85,
-            method=6,
-        )
-    else:
-        raise ValueError(f"unsupported animation format: {fmt}")
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Internal
 # ---------------------------------------------------------------------------
@@ -162,33 +106,114 @@ def _font(path: Path | None, size: int) -> ImageFont.FreeTypeFont | ImageFont.Im
         return ImageFont.load_default()
 
 
+def _block_font_size(h: int, spec: MemeSpec, which: Literal["top", "bottom"]) -> int:
+    pct = spec.top_size_pct if which == "top" else spec.bottom_size_pct
+    if pct is not None:
+        return max(8, int(h * pct / 100.0))
+    return max(12, int(h * spec.font_scale))
+
+
+def _block_rotation(spec: MemeSpec, which: Literal["top", "bottom"]) -> float:
+    return spec.top_rotation if which == "top" else spec.bottom_rotation
+
+
 def _render_classic(img: Image.Image, spec: MemeSpec) -> Image.Image:
-    out = img.copy()
     if not spec.top and not spec.bottom:
-        return out
-    draw = ImageDraw.Draw(out)
-    w, h = out.size
-    font_size = max(12, int(h * spec.font_scale))
+        return img.copy()
+    canvas = img.convert("RGBA")
+    for which in ("top", "bottom"):
+        text = spec.top if which == "top" else spec.bottom
+        if not text.strip():
+            continue
+        fill = spec.top_color if which == "top" else spec.bottom_color
+        block = _render_classic_block(canvas.size, spec, which, text, fill)
+        if block is None:
+            continue
+        layer, cx, cy = block
+        rot = _block_rotation(spec, which)
+        if rot:
+            # PIL rotates CCW for positive angles; pass -rot for clockwise.
+            layer = layer.rotate(-rot, resample=Image.BICUBIC, expand=True)
+        paste_x = int(round(cx - layer.width / 2))
+        paste_y = int(round(cy - layer.height / 2))
+        canvas.alpha_composite(layer, (paste_x, paste_y))
+    return canvas.convert("RGB")
+
+
+def _render_classic_block(
+    img_size: tuple[int, int],
+    spec: MemeSpec,
+    which: Literal["top", "bottom"],
+    text: str,
+    fill: RGB,
+) -> tuple[Image.Image, float, float] | None:
+    """Render one classic text block to a transparent RGBA layer.
+
+    Returns ``(layer, cx, cy)`` where ``cx, cy`` is the block centre in
+    source pixel coords. The layer is unrotated; callers rotate it if
+    ``spec`` calls for a non-zero rotation.
+    """
+    w, h = img_size
+    font_size = _block_font_size(h, spec, which)
     font = _font(spec.font_path, font_size)
     stroke = max(1, int(font_size * spec.stroke_ratio))
     max_width = int(w * (1.0 - 2 * spec.side_margin))
     xform = str.upper if spec.uppercase else (lambda s: s)
 
-    if spec.top:
-        lines = _wrap(xform(spec.top), font, max_width, draw)
-        _draw_block(
-            draw, lines, font, w, h, stroke,
-            anchor="top", pos=spec.top_pos,
-            fill=spec.top_color, stroke_fill=spec.stroke_color,
+    measurer = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    lines = _wrap(xform(text), font, max_width, measurer)
+    if not lines:
+        return None
+    line_h = _line_height(font)
+    gap = max(2, line_h // 10)
+    block_h = len(lines) * line_h + (len(lines) - 1) * gap
+    block_w = max(_text_width(measurer, line, font) for line in lines)
+
+    pad = stroke + 2
+    layer = Image.new("RGBA", (block_w + 2 * pad, block_h + 2 * pad), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    y = pad
+    fill_rgba = (*fill, 255)
+    stroke_rgba = (*spec.stroke_color, 255)
+    for line in lines:
+        tw = _text_width(draw, line, font)
+        x = pad + (block_w - tw) // 2
+        draw.text(
+            (x, y), line,
+            fill=fill_rgba, font=font,
+            stroke_width=stroke, stroke_fill=stroke_rgba,
         )
-    if spec.bottom:
-        lines = _wrap(xform(spec.bottom), font, max_width, draw)
-        _draw_block(
-            draw, lines, font, w, h, stroke,
-            anchor="bottom", pos=spec.bottom_pos,
-            fill=spec.bottom_color, stroke_fill=spec.stroke_color,
-        )
-    return out
+        y += line_h + gap
+
+    cx, cy = _classic_block_centre((w, h), spec, which, block_w, block_h, stroke)
+    return layer, cx, cy
+
+
+def _classic_block_centre(
+    img_size: tuple[int, int],
+    spec: MemeSpec,
+    which: Literal["top", "bottom"],
+    block_w: int,
+    block_h: int,
+    stroke: int,
+) -> tuple[float, float]:
+    w, h = img_size
+    pos = spec.top_pos if which == "top" else spec.bottom_pos
+    margin = int(h * 0.02) + stroke
+    rot = _block_rotation(spec, which)
+    if pos is not None:
+        cx = max(0.0, min(1.0, pos[0])) * w
+        cy = max(0.0, min(1.0, pos[1])) * h
+        if not rot:
+            # Keep the unrotated block fully inside the image. Skipped when
+            # rotated because the bbox shape changes mid-rotation and clamping
+            # makes the drag feel jittery.
+            cx = max(margin + block_w / 2, min(w - margin - block_w / 2, cx))
+            cy = max(margin + block_h / 2, min(h - margin - block_h / 2, cy))
+        return cx, cy
+    if which == "top":
+        return w / 2, margin + block_h / 2
+    return w / 2, h - margin - block_h / 2
 
 
 def _render_modern(img: Image.Image, spec: MemeSpec) -> Image.Image:
@@ -224,26 +249,29 @@ def _render_modern(img: Image.Image, spec: MemeSpec) -> Image.Image:
     return canvas
 
 
-def classic_block_rect(
+def classic_block_geometry(
     img_size: tuple[int, int],
     spec: MemeSpec,
     which: Literal["top", "bottom"],
-) -> tuple[int, int, int, int] | None:
-    """Pixel bounding rect (x, y, w, h) of the classic top/bottom text block,
-    or ``None`` if that block has no text. Used by the preview to hit-test
-    mouse drags. Returns coordinates in the source image's pixel space.
+) -> tuple[float, float, int, int, float] | None:
+    """Return ``(cx, cy, block_w, block_h, rotation_deg)`` for a classic text
+    block, in source image pixel coords. ``cx, cy`` is the block centre.
+    ``rotation_deg`` is clockwise. Returns ``None`` if the block has no text.
+
+    The bounding box is unrotated; callers that need the rotated polygon
+    apply the rotation transform themselves around ``(cx, cy)``.
     """
     text = spec.top if which == "top" else spec.bottom
     if not text.strip():
         return None
     w, h = img_size
-    font_size = max(12, int(h * spec.font_scale))
+    font_size = _block_font_size(h, spec, which)
     font = _font(spec.font_path, font_size)
     stroke = max(1, int(font_size * spec.stroke_ratio))
     max_width = int(w * (1.0 - 2 * spec.side_margin))
     xform = str.upper if spec.uppercase else (lambda s: s)
 
-    measurer = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    measurer = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     lines = _wrap(xform(text), font, max_width, measurer)
     if not lines:
         return None
@@ -252,74 +280,10 @@ def classic_block_rect(
     block_h = len(lines) * line_h + (len(lines) - 1) * gap
     block_w = max(_text_width(measurer, line, font) for line in lines)
 
-    pos = spec.top_pos if which == "top" else spec.bottom_pos
-    margin = int(h * 0.02) + stroke
-    if pos is not None:
-        cx = max(0.0, min(1.0, pos[0]))
-        cy = max(0.0, min(1.0, pos[1]))
-        y = int(cy * h - block_h / 2)
-        y = max(margin, min(h - block_h - margin, y))
-        x = int(cx * w - block_w / 2)
-        x = max(margin, min(w - block_w - margin, x))
-    elif which == "top":
-        y = margin
-        x = (w - block_w) // 2
-    else:
-        y = h - block_h - margin
-        x = (w - block_w) // 2
-    # Pad the hit rect a touch so the stroke edges remain grabbable.
     pad = max(4, stroke)
-    return (
-        max(0, x - pad),
-        max(0, y - pad),
-        min(w, block_w + 2 * pad),
-        min(h, block_h + 2 * pad),
-    )
-
-
-def _draw_block(
-    draw: ImageDraw.ImageDraw,
-    lines: list[str],
-    font: ImageFont.ImageFont,
-    w: int,
-    h: int,
-    stroke: int,
-    *,
-    anchor: Literal["top", "bottom"],
-    pos: tuple[float, float] | None = None,
-    fill: RGB = (255, 255, 255),
-    stroke_fill: RGB = (0, 0, 0),
-) -> None:
-    line_h = _line_height(font)
-    gap = max(2, line_h // 10)
-    block_h = len(lines) * line_h + (len(lines) - 1) * gap
-    margin = int(h * 0.02) + stroke
-    if pos is not None:
-        # Treat (cx, cy) as the centre of the rendered block.
-        cy = max(0.0, min(1.0, pos[1]))
-        y = int(cy * h - block_h / 2)
-        y = max(margin, min(h - block_h - margin, y))
-    elif anchor == "top":
-        y = margin
-    else:
-        y = h - block_h - margin
-    for line in lines:
-        tw = _text_width(draw, line, font)
-        if pos is not None:
-            cx = max(0.0, min(1.0, pos[0]))
-            x = int(cx * w - tw / 2)
-            x = max(margin, min(w - tw - margin, x))
-        else:
-            x = (w - tw) // 2
-        draw.text(
-            (x, y),
-            line,
-            fill=fill,
-            font=font,
-            stroke_width=stroke,
-            stroke_fill=stroke_fill,
-        )
-        y += line_h + gap
+    cx, cy = _classic_block_centre((w, h), spec, which, block_w, block_h, stroke)
+    rot = _block_rotation(spec, which)
+    return cx, cy, block_w + 2 * pad, block_h + 2 * pad, rot
 
 
 def _wrap(

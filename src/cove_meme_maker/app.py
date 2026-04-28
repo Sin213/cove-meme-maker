@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import io
-import tempfile
 from pathlib import Path
 
 from PIL import Image
 from PySide6.QtCore import (
-    QPoint,
-    QRect,
+    QEvent,
+    QRectF,
     QSettings,
     QStandardPaths,
-    QThread,
     Qt,
     QTimer,
     Signal,
@@ -21,100 +19,257 @@ from PySide6.QtGui import (
     QDropEvent,
     QIcon,
     QImage,
+    QLinearGradient,
     QMouseEvent,
+    QPainter,
     QPixmap,
+    QRadialGradient,
 )
 from PySide6.QtWidgets import (
     QApplication,
-    QButtonGroup,
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QDialog,
     QFileDialog,
-    QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
-    QProgressBar,
     QPushButton,
-    QRadioButton,
+    QScrollArea,
     QSizePolicy,
+    QSlider,
     QSpinBox,
-    QStatusBar,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from . import __version__, ffmpeg_utils as ff, updater
+from . import __version__, theme, updater
 from . import fonts
-from .export_worker import AnimatedJob, start_animated_export, start_export
-from .timeline import TrimBar
+from .chrome import CoveTitleBar, FramelessResizer
+from .crop_dialog import CropDialog
 from .image_renderer import (
     MemeSpec,
-    classic_block_rect,
-    is_animated,
-    load_animation,
+    classic_block_geometry,
     render,
     render_to_file,
 )
-from .video_renderer import VideoJob
+from .text_overlay import BlockGeom, TextOverlay
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-# .gif and animated .webp are probed as potentially-animated and routed to the
-# pure-Pillow multi-frame path; if they're single-frame they fall back to the
-# still-image path.
-ANIMATED_EXTS = {".gif", ".webp"}
-VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"}
-OPEN_FILTERS = (
-    "Media (*.png *.jpg *.jpeg *.webp *.bmp *.mp4 *.mkv *.webm *.mov *.avi *.m4v *.gif);;"
-    "Images (*.png *.jpg *.jpeg *.webp *.bmp);;"
-    "Videos (*.mp4 *.mkv *.webm *.mov *.avi *.m4v);;"
-    "All files (*)"
-)
+OPEN_FILTERS = "Images (*.png *.jpg *.jpeg *.webp *.bmp);;All files (*)"
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 ICON_PATH = ASSETS_DIR / "cove_icon.png"
 
-DROP_STYLE_IDLE = "QFrame#drop { border: 2px dashed #4a5160; border-radius: 8px; background:#14181f; }"
-DROP_STYLE_HOVER = "QFrame#drop { border: 2px dashed #5fb4ff; border-radius: 8px; background:#1b2330; }"
-DROP_STYLE_LOADED = "QFrame#drop { border: 1px solid #2a2f3a; border-radius: 8px; background:#0e1116; }"
+
+# ── Helper widgets ─────────────────────────────────────────────────────────
+
+class CoveRoot(QWidget):
+    """Painted background with subtle radial glows, matching cove-nexus."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("cove-root")
+
+    def paintEvent(self, _event) -> None:  # noqa: ANN001
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        bg = QLinearGradient(0, 0, 0, h)
+        bg.setColorAt(0.0, QColor(theme.BG_GRAD_TOP))
+        bg.setColorAt(1.0, QColor(theme.BG_GRAD_BOT))
+        p.fillRect(self.rect(), bg)
+        glow1 = QRadialGradient(w * 0.85, h * -0.1, max(w, h) * 0.7)
+        glow1.setColorAt(0.0, QColor(80, 230, 207, 16))
+        glow1.setColorAt(1.0, QColor(80, 230, 207, 0))
+        p.fillRect(self.rect(), glow1)
+        glow2 = QRadialGradient(w * -0.1, h * 1.0, max(w, h) * 0.55)
+        glow2.setColorAt(0.0, QColor(80, 230, 207, 10))
+        glow2.setColorAt(1.0, QColor(80, 230, 207, 0))
+        p.fillRect(self.rect(), glow2)
 
 
-class DropFrame(QFrame):
+class ColorButton(QPushButton):
+    colorChanged = Signal(tuple)
+
+    def __init__(self, color: tuple[int, int, int], label: str = "",
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        r, g, b = color
+        self._hex = f"#{r:02x}{g:02x}{b:02x}"
+        self._label = label
+        self.setMinimumHeight(38)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 6, 10, 6)
+        layout.setSpacing(8)
+        self._swatch = QLabel()
+        self._swatch.setFixedSize(22, 22)
+        self._swatch.setStyleSheet(self._swatch_qss())
+        layout.addWidget(self._swatch)
+        text_block = QVBoxLayout()
+        text_block.setSpacing(1)
+        self._label_lbl = QLabel(label)
+        self._label_lbl.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: 11px;"
+            f" background: transparent; border: none;"
+        )
+        self._hex_lbl = QLabel(self._hex.upper())
+        self._hex_lbl.setStyleSheet(
+            f"color: {theme.TEXT_FAINT}; font-size: 10.5px;"
+            f" font-family: '{theme.FONT_MONO}', monospace;"
+            f" background: transparent; border: none;"
+        )
+        text_block.addWidget(self._label_lbl)
+        text_block.addWidget(self._hex_lbl)
+        layout.addLayout(text_block, stretch=1)
+        self._refresh_btn_style()
+        self.clicked.connect(self._open_dialog)
+
+    def color(self) -> tuple[int, int, int]:
+        c = QColor(self._hex)
+        return (c.red(), c.green(), c.blue())
+
+    def set_color(self, color: tuple[int, int, int]) -> None:
+        r, g, b = color
+        self._hex = f"#{r:02x}{g:02x}{b:02x}"
+        self._swatch.setStyleSheet(self._swatch_qss())
+        self._hex_lbl.setText(self._hex.upper())
+
+    def _swatch_qss(self) -> str:
+        return (
+            f"background: {self._hex}; border: 1px solid {theme.BORDER_STRONG};"
+            f" border-radius: 5px;"
+        )
+
+    def _refresh_btn_style(self) -> None:
+        self.setStyleSheet(
+            f"QPushButton {{ background: {theme.SURFACE};"
+            f" border: 1px solid {theme.BORDER}; border-radius: {theme.RADIUS_SM}px;"
+            f" padding: 0; text-align: left; }}"
+            f"QPushButton:hover {{ background: {theme.SURFACE_2};"
+            f" border-color: {theme.BORDER_HARD}; }}"
+        )
+
+    def _open_dialog(self) -> None:
+        col = QColorDialog.getColor(
+            QColor(self._hex), self,
+            f"Pick {self._label.lower() or 'color'}",
+            QColorDialog.ShowAlphaChannel,
+        )
+        if col.isValid():
+            self._hex = col.name()
+            self._swatch.setStyleSheet(self._swatch_qss())
+            self._hex_lbl.setText(self._hex.upper())
+            self.colorChanged.emit(self.color())
+
+
+class SliderRow(QWidget):
+    """label | slider | spin — linked."""
+
+    valueChanged = Signal(int)
+
+    def __init__(self, label: str, lo: int, hi: int, value: int,
+                 suffix: str = "%", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        lbl = QLabel(label)
+        lbl.setProperty("role", "field-label")
+        lbl.setFixedWidth(56)
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(lo, hi)
+        self.slider.setValue(value)
+        self.spin = QSpinBox()
+        self.spin.setRange(lo, hi)
+        self.spin.setValue(value)
+        self.spin.setSuffix(suffix)
+        self.spin.setFixedWidth(64)
+        self.slider.valueChanged.connect(self._from_slider)
+        self.spin.valueChanged.connect(self._from_spin)
+        layout.addWidget(lbl)
+        layout.addWidget(self.slider, stretch=1)
+        layout.addWidget(self.spin)
+
+    def value(self) -> int:
+        return self.slider.value()
+
+    def setValue(self, v: int) -> None:
+        self.slider.blockSignals(True)
+        self.spin.blockSignals(True)
+        self.slider.setValue(v)
+        self.spin.setValue(v)
+        self.slider.blockSignals(False)
+        self.spin.blockSignals(False)
+
+    def setEnabled(self, enabled: bool) -> None:
+        super().setEnabled(enabled)
+        self.slider.setEnabled(enabled)
+        self.spin.setEnabled(enabled)
+
+    def _from_slider(self, v: int) -> None:
+        self.spin.blockSignals(True)
+        self.spin.setValue(v)
+        self.spin.blockSignals(False)
+        self.valueChanged.emit(v)
+
+    def _from_spin(self, v: int) -> None:
+        self.slider.blockSignals(True)
+        self.slider.setValue(v)
+        self.slider.blockSignals(False)
+        self.valueChanged.emit(v)
+
+
+class DropZone(QFrame):
+    """Empty-state drop area shown when no image is loaded."""
+
     fileDropped = Signal(str)
     clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("drop")
+        self.setObjectName("drop-zone")
         self.setAcceptDrops(True)
-        self.setFrameShape(QFrame.StyledPanel)
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet(DROP_STYLE_IDLE)
 
-    def set_loaded_style(self, loaded: bool) -> None:
-        self.setStyleSheet(DROP_STYLE_LOADED if loaded else DROP_STYLE_IDLE)
-        self.setCursor(Qt.ArrowCursor if loaded else Qt.PointingHandCursor)
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+        layout.setSpacing(10)
+        title = QLabel("Drop an image to begin")
+        title.setStyleSheet(
+            f"font-size: 15px; font-weight: 500; color: {theme.TEXT};"
+            " background: transparent;"
+        )
+        title.setAlignment(Qt.AlignCenter)
+        sub = QLabel("PNG  ·  JPG  ·  WebP  ·  BMP")
+        sub.setStyleSheet(
+            f"font-size: 12.5px; color: {theme.TEXT_DIM};"
+            " background: transparent;"
+        )
+        sub.setAlignment(Qt.AlignCenter)
+        btn = QPushButton("Choose file")
+        btn.setProperty("class", "tb-btn")
+        btn.clicked.connect(self.clicked.emit)
+        btn.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(title)
+        layout.addWidget(sub)
+        layout.addWidget(btn, alignment=Qt.AlignCenter)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
-            self.setStyleSheet(DROP_STYLE_HOVER)
-
-    def dragLeaveEvent(self, _event) -> None:
-        self.setStyleSheet(DROP_STYLE_IDLE)
 
     def dropEvent(self, event: QDropEvent) -> None:
-        self.setStyleSheet(DROP_STYLE_IDLE)
         urls = event.mimeData().urls()
-        if not urls:
-            return
-        path = urls[0].toLocalFile()
-        if path:
-            self.fileDropped.emit(path)
+        if urls:
+            path = urls[0].toLocalFile()
+            if path:
+                self.fileDropped.emit(path)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
@@ -123,96 +278,41 @@ class DropFrame(QFrame):
 
 
 class PreviewLabel(QLabel):
-    """QLabel that emits rich mouse signals. Used so the MainWindow can
-    hit-test against the rendered meme and handle drag-to-reposition."""
-
-    pressed = Signal(object)    # QPoint
-    moved = Signal(object)      # QPoint
-    released = Signal(object)   # QPoint
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setMouseTracking(True)
+    pressed = Signal()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
-            self.pressed.emit(event.position().toPoint())
-
-    def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        self.moved.emit(event.position().toPoint())
-
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.LeftButton:
-            self.released.emit(event.position().toPoint())
+            self.pressed.emit()
+        super().mousePressEvent(event)
 
 
-class ColorSwatch(QPushButton):
-    """Small square button that opens a colour dialog and paints its own colour."""
-
-    colorChanged = Signal(tuple)  # (r, g, b)
-
-    def __init__(self, color: tuple[int, int, int], parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setFixedSize(28, 28)
-        self.setCursor(Qt.PointingHandCursor)
-        self._color = color
-        self._apply_style()
-        self.clicked.connect(self._pick)
-
-    def color(self) -> tuple[int, int, int]:
-        return self._color
-
-    def set_color(self, color: tuple[int, int, int]) -> None:
-        self._color = color
-        self._apply_style()
-
-    def _apply_style(self) -> None:
-        r, g, b = self._color
-        self.setStyleSheet(
-            f"QPushButton {{ background:#{r:02x}{g:02x}{b:02x}; "
-            f"border:1px solid #2a2f3a; border-radius:4px; }}"
-        )
-
-    def _pick(self) -> None:
-        initial = QColor(*self._color)
-        c = QColorDialog.getColor(initial, self, "Pick text colour")
-        if c.isValid():
-            self._color = (c.red(), c.green(), c.blue())
-            self._apply_style()
-            self.colorChanged.emit(self._color)
-
+# ── Main window ────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"Cove Meme Maker v{__version__}")
-        self.resize(1080, 720)
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.resize(1380, 880)
+        self.setMinimumSize(960, 640)
+        self.setMouseTracking(True)
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
 
+        self._frameless_resizer = FramelessResizer(self)
+
         self._source_path: Path | None = None
-        self._source_kind: str | None = None  # "image" | "video" | "animated"
-        # Pillow image used for preview. For videos this is an extracted frame;
-        # for animated GIFs it's the first frame of the sequence.
         self._preview_base: Image.Image | None = None
-        self._animated_frames: list[Image.Image] | None = None
-        self._animated_durations: list[int] | None = None  # ms per frame
-        self._video_info: ff.VideoInfo | None = None
-        self._trim_start: float | None = None
-        self._trim_end: float | None = None
         self._top_pos: tuple[float, float] | None = None
         self._bottom_pos: tuple[float, float] | None = None
-        # Drag state for repositioning classic text on the preview.
-        self._drag_target: str | None = None  # "top" | "bottom" | None
-        self._drag_grab: tuple[float, float] = (0.0, 0.0)  # normalised offset from block centre
-        # Set on each preview refresh so mouse events can map label->image.
-        self._pixmap_rect: QRect = QRect()
+        self._top_size_pct: float | None = None
+        self._bottom_size_pct: float | None = None
+        self._top_rotation: float = 0.0
+        self._bottom_rotation: float = 0.0
+        self._pixmap_rect = QRectF()
         self._pixmap_src_size: tuple[int, int] = (0, 0)
-        self._tempdir = tempfile.TemporaryDirectory(prefix="cove-meme-")
 
         self._font_choices = fonts.list_choices()
-        self._export_thread: QThread | None = None
-        self._export_worker = None
         self._settings = QSettings("Cove", "cove-meme-maker")
 
         self._preview_timer = QTimer(self)
@@ -234,135 +334,246 @@ class MainWindow(QMainWindow):
         )
         QTimer.singleShot(4000, self._updater.check)
 
-    # ------------------------------------------------------------------ UI
+    # ── UI construction ────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QHBoxLayout(central)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(12)
+        root = CoveRoot()
+        self.setCentralWidget(root)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        # --- Left: preview --------------------------------------------
-        self.drop_frame = DropFrame()
-        self.drop_frame.setMinimumSize(520, 520)
-        self.drop_frame.fileDropped.connect(self._on_file_dropped)
-        self.drop_frame.clicked.connect(self._on_drop_clicked)
-        drop_layout = QVBoxLayout(self.drop_frame)
-        drop_layout.setContentsMargins(12, 12, 12, 12)
-        drop_layout.setSpacing(8)
+        chrome = QWidget()
+        chrome.setObjectName("cove-chrome")
+        outer.addWidget(chrome, stretch=1)
+        chrome_layout = QVBoxLayout(chrome)
+        chrome_layout.setContentsMargins(0, 0, 0, 0)
+        chrome_layout.setSpacing(0)
 
-        self.loaded_bar = QWidget()
-        loaded_layout = QHBoxLayout(self.loaded_bar)
-        loaded_layout.setContentsMargins(0, 0, 0, 0)
-        loaded_layout.setSpacing(8)
-        self.loaded_name = QLabel("")
-        self.loaded_name.setStyleSheet(
-            "color:#cfd0d4; font-size:12px; border:none; background:transparent;"
+        icon_path = str(ICON_PATH) if ICON_PATH.exists() else None
+        self._titlebar = CoveTitleBar(
+            self, icon_path=icon_path,
+            title="Cove Meme Maker", version=f"v{__version__}",
         )
-        self.loaded_name.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        chrome_layout.addWidget(self._titlebar)
+
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        chrome_layout.addWidget(body, stretch=1)
+
+        # ── Canvas pane ──────────────────────────────────────────
+        canvas_pane = QWidget()
+        canvas_pane.setObjectName("canvas-pane")
+        canvas_layout = QVBoxLayout(canvas_pane)
+        canvas_layout.setContentsMargins(0, 0, 0, 0)
+        canvas_layout.setSpacing(0)
+
+        # Toolbar
+        toolbar = QWidget()
+        toolbar.setObjectName("canvas-toolbar")
+        toolbar.setFixedHeight(52)
+        tb_layout = QHBoxLayout(toolbar)
+        tb_layout.setContentsMargins(18, 0, 18, 0)
+        tb_layout.setSpacing(12)
+
+        file_info = QWidget()
+        fi_layout = QVBoxLayout(file_info)
+        fi_layout.setContentsMargins(0, 0, 0, 0)
+        fi_layout.setSpacing(1)
+        self.file_name_label = QLabel("No image — drop a file or click Open")
+        self.file_name_label.setProperty("role", "file-name")
+        self.file_meta_label = QLabel("—")
+        self.file_meta_label.setProperty("role", "file-meta")
+        fi_layout.addWidget(self.file_name_label)
+        fi_layout.addWidget(self.file_meta_label)
+        tb_layout.addWidget(file_info, stretch=1)
+
+        self.crop_btn = QPushButton("Crop")
+        self.crop_btn.setProperty("class", "tb-btn")
+        self.crop_btn.setToolTip("Crop the image")
+        self.crop_btn.clicked.connect(self._on_crop_clicked)
+        self.crop_btn.setEnabled(False)
+
+        self.reset_btn = QPushButton("Reset")
+        self.reset_btn.setProperty("class", "tb-btn")
+        self.reset_btn.setToolTip("Reset text position / size / rotation")
+        self.reset_btn.clicked.connect(self._on_reset_text)
+        self.reset_btn.setEnabled(False)
+
         self.clear_btn = QPushButton("Clear")
-        self.clear_btn.setToolTip("Remove the loaded file and drop in a new one")
+        self.clear_btn.setProperty("class", "tb-btn")
+        self.clear_btn.setToolTip("Remove the loaded image")
         self.clear_btn.clicked.connect(self._clear_source)
-        loaded_layout.addWidget(self.loaded_name, stretch=1)
-        loaded_layout.addWidget(self.clear_btn)
-        self.loaded_bar.setVisible(False)
-        drop_layout.addWidget(self.loaded_bar)
+        self.clear_btn.setEnabled(False)
 
-        self.preview_label = PreviewLabel("Click or drop an image or video here")
+        tb_layout.addWidget(self.crop_btn)
+        tb_layout.addWidget(self.reset_btn)
+        tb_layout.addWidget(self.clear_btn)
+        canvas_layout.addWidget(toolbar)
+
+        # Stage
+        self.stage = QWidget()
+        self.stage.setObjectName("canvas-stage")
+        self.stage.setAcceptDrops(True)
+        stage_layout = QVBoxLayout(self.stage)
+        stage_layout.setContentsMargins(32, 32, 32, 32)
+        stage_layout.setAlignment(Qt.AlignCenter)
+
+        self.drop_zone = DropZone()
+        self.drop_zone.fileDropped.connect(self._on_file_dropped)
+        self.drop_zone.clicked.connect(self._open_dialog)
+        self.drop_zone.setMinimumSize(400, 300)
+        stage_layout.addWidget(self.drop_zone)
+
+        self.preview_label = PreviewLabel()
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setStyleSheet(
-            "color:#7a8294; font-size:14px; border:none; background:transparent;"
-        )
         self.preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.preview_label.setMinimumSize(400, 400)
-        self.preview_label.pressed.connect(self._on_preview_pressed)
-        self.preview_label.moved.connect(self._on_preview_moved)
-        self.preview_label.released.connect(self._on_preview_released)
-        drop_layout.addWidget(self.preview_label, stretch=1)
+        self.preview_label.setStyleSheet("background: transparent;")
+        self.preview_label.pressed.connect(self._on_preview_clicked)
+        self.preview_label.hide()
+        stage_layout.addWidget(self.preview_label, stretch=1)
 
-        self.trim_bar = TrimBar()
-        self.trim_bar.rangeChanged.connect(self._on_trim_changed)
-        self.trim_bar.rangePreviewing.connect(self._on_trim_changed)
-        self.trim_bar.setVisible(False)
-        drop_layout.addWidget(self.trim_bar)
+        self.text_overlay = TextOverlay(self.preview_label)
+        self.text_overlay.positionChanged.connect(self._on_text_position_changed)
+        self.text_overlay.sizeChanged.connect(self._on_text_size_changed)
+        self.text_overlay.rotationChanged.connect(self._on_text_rotation_changed)
+        self.text_overlay.activeBlockChanged.connect(self._on_active_block_changed)
+        self.text_overlay.hide()
 
-        root.addWidget(self.drop_frame, stretch=3)
+        self.preview_label.installEventFilter(self)
 
-        # --- Right: controls ------------------------------------------
-        panel = QVBoxLayout()
-        panel.setSpacing(10)
+        canvas_layout.addWidget(self.stage, stretch=1)
 
-        style_box = QFrame()
-        style_box.setObjectName("styleBox")
-        style_box.setStyleSheet(
-            "QFrame#styleBox { border:1px solid #2a2f3a; border-radius:6px; }"
-        )
-        style_layout = QHBoxLayout(style_box)
-        style_layout.setContentsMargins(10, 8, 10, 8)
-        self.style_classic = QRadioButton("Classic")
-        self.style_classic.setToolTip("White text with black outline, inside the image")
-        self.style_classic.setChecked(True)
-        self.style_modern = QRadioButton("Modern")
-        self.style_modern.setToolTip("Black caption on a white band above the image")
-        self._style_group = QButtonGroup(self)
-        self._style_group.addButton(self.style_classic)
-        self._style_group.addButton(self.style_modern)
-        self.style_classic.toggled.connect(self._on_style_toggled)
-        self.style_modern.toggled.connect(self._on_style_toggled)
-        style_layout.addWidget(QLabel("Style:"))
-        style_layout.addWidget(self.style_classic)
-        style_layout.addWidget(self.style_modern)
-        style_layout.addStretch(1)
-        panel.addWidget(style_box)
+        # Status bar
+        statusbar = QWidget()
+        statusbar.setObjectName("statusbar")
+        statusbar.setFixedHeight(26)
+        sb_layout = QHBoxLayout(statusbar)
+        sb_layout.setContentsMargins(14, 0, 14, 0)
+        sb_layout.setSpacing(8)
+        pulse = QWidget()
+        pulse.setObjectName("pulse")
+        pulse.setFixedSize(6, 6)
+        sb_layout.addWidget(pulse)
+        self.status_msg = QLabel("Ready")
+        self.status_msg.setObjectName("status-msg")
+        sb_layout.addWidget(self.status_msg)
+        sb_layout.addStretch(1)
+        self.status_doc = QLabel("—")
+        self.status_doc.setObjectName("status-doc")
+        sb_layout.addWidget(self.status_doc)
+        canvas_layout.addWidget(statusbar)
 
-        # Classic text inputs — each has a colour swatch beside its label.
-        self.top_swatch = ColorSwatch((255, 255, 255))
-        self.top_swatch.colorChanged.connect(self._schedule_preview)
-        self.top_label_row, self.top_label = _labeled_row("Top text", self.top_swatch)
+        body_layout.addWidget(canvas_pane, stretch=1)
+
+        # ── Inspector pane ───────────────────────────────────────
+        inspector = QWidget()
+        inspector.setObjectName("inspector")
+        inspector.setFixedWidth(380)
+        insp_layout = QVBoxLayout(inspector)
+        insp_layout.setContentsMargins(0, 0, 0, 0)
+        insp_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_content = QWidget()
+        self._insp_layout = QVBoxLayout(scroll_content)
+        self._insp_layout.setContentsMargins(20, 18, 20, 14)
+        self._insp_layout.setSpacing(22)
+        scroll.setWidget(scroll_content)
+        insp_layout.addWidget(scroll, stretch=1)
+
+        # Section: STYLE
+        self._add_section("STYLE")
+        seg_frame = QWidget()
+        seg_frame.setObjectName("seg-frame")
+        seg_layout = QHBoxLayout(seg_frame)
+        seg_layout.setContentsMargins(3, 3, 3, 3)
+        seg_layout.setSpacing(3)
+        self.style_modern = QPushButton("Modern")
+        self.style_modern.setProperty("class", "seg-btn")
+        self.style_modern.setCheckable(True)
+        self.style_modern.setChecked(True)
+        self.style_classic = QPushButton("Classic")
+        self.style_classic.setProperty("class", "seg-btn")
+        self.style_classic.setCheckable(True)
+        self.style_modern.clicked.connect(lambda: self._set_style("modern"))
+        self.style_classic.clicked.connect(lambda: self._set_style("classic"))
+        seg_layout.addWidget(self.style_modern, stretch=1)
+        seg_layout.addWidget(self.style_classic, stretch=1)
+        self._insp_layout.addWidget(seg_frame)
+
+        # Section: CAPTION (modern)
+        self._modern_section = QWidget()
+        modern_layout = QVBoxLayout(self._modern_section)
+        modern_layout.setContentsMargins(0, 0, 0, 0)
+        modern_layout.setSpacing(6)
+        cap_head = QHBoxLayout()
+        cap_label = QLabel("Caption")
+        cap_label.setProperty("role", "caption-label")
+        cap_hint = QLabel("above image")
+        cap_hint.setProperty("role", "caption-hint")
+        cap_head.addWidget(cap_label)
+        cap_head.addWidget(cap_hint)
+        cap_head.addStretch(1)
+        modern_layout.addLayout(cap_head)
+        self.caption_swatch = ColorButton((0, 0, 0), "Text color")
+        self.caption_swatch.colorChanged.connect(self._schedule_preview)
+        modern_layout.addWidget(self.caption_swatch)
+        self.caption_edit = QTextEdit()
+        self.caption_edit.setPlaceholderText("Caption text…")
+        self.caption_edit.setFixedHeight(76)
+        self.caption_edit.textChanged.connect(self._schedule_preview)
+        modern_layout.addWidget(self.caption_edit)
+        self._insp_layout.addWidget(self._modern_section)
+
+        # Section: CAPTION (classic — top + bottom)
+        self._classic_section = QWidget()
+        classic_layout = QVBoxLayout(self._classic_section)
+        classic_layout.setContentsMargins(0, 0, 0, 0)
+        classic_layout.setSpacing(10)
+
+        top_label = QLabel("Top text")
+        top_label.setProperty("role", "caption-label")
+        classic_layout.addWidget(top_label)
         self.top_edit = QTextEdit()
         self.top_edit.setPlaceholderText("TOP TEXT")
         self.top_edit.setFixedHeight(60)
         self.top_edit.textChanged.connect(self._schedule_preview)
+        classic_layout.addWidget(self.top_edit)
+        self.top_swatch = ColorButton((255, 255, 255), "Top color")
+        self.top_swatch.colorChanged.connect(self._schedule_preview)
+        classic_layout.addWidget(self.top_swatch)
 
-        self.bottom_swatch = ColorSwatch((255, 255, 255))
-        self.bottom_swatch.colorChanged.connect(self._schedule_preview)
-        self.bottom_label_row, self.bottom_label = _labeled_row(
-            "Bottom text", self.bottom_swatch,
-        )
+        bot_label = QLabel("Bottom text")
+        bot_label.setProperty("role", "caption-label")
+        classic_layout.addWidget(bot_label)
         self.bottom_edit = QTextEdit()
         self.bottom_edit.setPlaceholderText("BOTTOM TEXT")
         self.bottom_edit.setFixedHeight(60)
         self.bottom_edit.textChanged.connect(self._schedule_preview)
+        classic_layout.addWidget(self.bottom_edit)
+        self.bottom_swatch = ColorButton((255, 255, 255), "Bottom color")
+        self.bottom_swatch.colorChanged.connect(self._schedule_preview)
+        classic_layout.addWidget(self.bottom_swatch)
 
-        # Modern text input
-        self.caption_swatch = ColorSwatch((0, 0, 0))
-        self.caption_swatch.colorChanged.connect(self._schedule_preview)
-        self.caption_label_row, self.caption_label = _labeled_row(
-            "Caption", self.caption_swatch,
-        )
-        self.caption_edit = QTextEdit()
-        self.caption_edit.setPlaceholderText("Write your caption here…")
-        self.caption_edit.setFixedHeight(100)
-        self.caption_edit.textChanged.connect(self._schedule_preview)
-
-        self.uppercase_check = QCheckBox("ALL CAPS")
+        self.uppercase_check = QCheckBox("All caps")
         self.uppercase_check.setChecked(True)
-        self.uppercase_check.setToolTip("Classic style: force uppercase. Off respects the case you typed.")
         self.uppercase_check.toggled.connect(self._schedule_preview)
+        classic_layout.addWidget(self.uppercase_check)
 
-        panel.addWidget(self.top_label_row)
-        panel.addWidget(self.top_edit)
-        panel.addWidget(self.bottom_label_row)
-        panel.addWidget(self.bottom_edit)
-        panel.addWidget(self.caption_label_row)
-        panel.addWidget(self.caption_edit)
-        panel.addWidget(self.uppercase_check)
+        self._insp_layout.addWidget(self._classic_section)
 
-        # Typography controls
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignRight)
+        # Section: TYPOGRAPHY
+        self._add_section("TYPOGRAPHY")
 
+        font_row = QHBoxLayout()
+        font_lbl = QLabel("Font")
+        font_lbl.setProperty("role", "field-label")
+        font_lbl.setFixedWidth(56)
         self.font_combo = QComboBox()
         if self._font_choices:
             for label, path in self._font_choices:
@@ -370,143 +581,91 @@ class MainWindow(QMainWindow):
         else:
             self.font_combo.addItem("Default", "")
         self.font_combo.currentIndexChanged.connect(self._schedule_preview)
-
-        self.add_font_btn = QPushButton("Load .ttf…")
+        self.add_font_btn = QPushButton(".ttf")
+        self.add_font_btn.setProperty("class", "tb-btn")
         self.add_font_btn.clicked.connect(self._on_load_font)
-
-        font_row = QHBoxLayout()
+        font_row.addWidget(font_lbl)
         font_row.addWidget(self.font_combo, stretch=1)
         font_row.addWidget(self.add_font_btn)
         font_row_w = QWidget()
         font_row_w.setLayout(font_row)
+        font_row.setContentsMargins(0, 0, 0, 0)
+        self._insp_layout.addWidget(font_row_w)
 
-        self.size_spin = QSpinBox()
-        self.size_spin.setRange(3, 30)
-        self.size_spin.setValue(9)
-        self.size_spin.setSuffix(" %")
-        self.size_spin.setToolTip("Font size as a percentage of image height")
-        self.size_spin.valueChanged.connect(self._schedule_preview)
+        self.size_slider = SliderRow("Size", 2, 30, 9, "%")
+        self.size_slider.valueChanged.connect(self._on_global_size_changed)
+        self._insp_layout.addWidget(self.size_slider)
 
-        self.stroke_spin = QSpinBox()
-        self.stroke_spin.setRange(0, 20)
-        self.stroke_spin.setValue(8)
-        self.stroke_spin.setSuffix(" %")
-        self.stroke_spin.setToolTip("Classic stroke width, percent of font size")
-        self.stroke_spin.valueChanged.connect(self._schedule_preview)
+        self.stroke_slider = SliderRow("Stroke", 0, 20, 8, "%")
+        self.stroke_slider.valueChanged.connect(self._schedule_preview)
+        self._insp_layout.addWidget(self.stroke_slider)
 
-        self.pad_spin = QSpinBox()
-        self.pad_spin.setRange(5, 60)
-        self.pad_spin.setValue(22)
-        self.pad_spin.setSuffix(" %")
-        self.pad_spin.setToolTip("Modern band height, percent of image height")
-        self.pad_spin.valueChanged.connect(self._schedule_preview)
+        self.pad_slider = SliderRow("Padding", 5, 60, 22, "%")
+        self.pad_slider.valueChanged.connect(self._schedule_preview)
+        self._insp_layout.addWidget(self.pad_slider)
 
-        form.addRow("Font", font_row_w)
-        form.addRow("Size", self.size_spin)
-        form.addRow("Stroke", self.stroke_spin)
-        form.addRow("Padding", self.pad_spin)
+        self._insp_layout.addStretch(1)
 
-        form_w = QWidget()
-        form_w.setLayout(form)
-        panel.addWidget(form_w)
+        # Footer
+        footer = QWidget()
+        footer.setObjectName("inspector-footer")
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(20, 14, 20, 18)
+        footer_layout.setSpacing(8)
 
-        # Video-only output controls
-        self.video_form = QFormLayout()
-        self.video_form.setLabelAlignment(Qt.AlignRight)
-
-        self.fmt_combo = QComboBox()
-        self.fmt_combo.addItems(["WebP", "GIF", "MP4"])
-        self.fmt_combo.currentTextChanged.connect(self._on_format_changed)
-
-        self.fps_combo = QComboBox()
-        self.fps_combo.addItems(["8", "12", "15", "24", "30"])
-        self.fps_combo.setCurrentText("15")
-
-        self.scale_combo = QComboBox()
-        self.scale_combo.addItems(["25", "50", "75", "100"])
-        self.scale_combo.setCurrentText("100")
-
-        self.webp_quality = QSpinBox()
-        self.webp_quality.setRange(1, 100)
-        self.webp_quality.setValue(80)
-
-        self.keep_audio_check = QCheckBox("Keep audio")
-        self.keep_audio_check.setChecked(True)
-        self.keep_audio_check.setToolTip("MP4 only. Off strips the audio track.")
-
-        self.video_form.addRow("Format", self.fmt_combo)
-        self.video_form.addRow("FPS", self.fps_combo)
-        self.video_form.addRow("Scale %", self.scale_combo)
-        self.video_form.addRow("Quality", self.webp_quality)
-        self.video_form.addRow("Audio", self.keep_audio_check)
-
-        self.video_form_w = QWidget()
-        self.video_form_w.setLayout(self.video_form)
-        self.video_form_w.setVisible(False)
-        panel.addWidget(self.video_form_w)
-
-        panel.addStretch(1)
-
-        # Export buttons
-        self.export_btn = QPushButton("Export")
-        self.export_btn.setMinimumHeight(40)
-        self.export_btn.setStyleSheet(
-            "QPushButton { background:#2563eb; color:white; font-weight:600; "
-            "border:none; border-radius:6px; padding:8px 16px; }"
-            "QPushButton:hover { background:#1d4ed8; }"
-            "QPushButton:disabled { background:#3a4150; color:#9aa0ad; }"
-        )
+        self.export_btn = QPushButton("Export PNG")
+        self.export_btn.setObjectName("btn-primary")
+        self.export_btn.setMinimumHeight(38)
         self.export_btn.clicked.connect(self._on_export_clicked)
 
-        self.copy_btn = QPushButton("Copy image")
-        self.copy_btn.setToolTip(
-            "Copy the rendered preview to the clipboard — paste directly into a chat app."
-        )
+        self.copy_btn = QPushButton("Copy to clipboard")
+        self.copy_btn.setObjectName("btn-ghost")
+        self.copy_btn.setMinimumHeight(38)
         self.copy_btn.clicked.connect(self._on_copy_clicked)
 
-        self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.clicked.connect(self._on_cancel_clicked)
+        footer_layout.addWidget(self.export_btn)
+        footer_layout.addWidget(self.copy_btn)
+        insp_layout.addWidget(footer)
 
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setTextVisible(True)
-        self.progress.setFormat("%p%")
-
-        action_row = QHBoxLayout()
-        action_row.addWidget(self.copy_btn)
-        action_row.addWidget(self.cancel_btn)
-        action_row_w = QWidget()
-        action_row_w.setLayout(action_row)
-
-        panel.addWidget(self.export_btn)
-        panel.addWidget(action_row_w)
-        panel.addWidget(self.progress)
-
-        panel_w = QWidget()
-        panel_w.setLayout(panel)
-        panel_w.setMinimumWidth(360)
-        panel_w.setMaximumWidth(440)
-        root.addWidget(panel_w, stretch=2)
-
-        self.status = QStatusBar()
-        self.setStatusBar(self.status)
-
-        self._on_format_changed(self.fmt_combo.currentText())
+        body_layout.addWidget(inspector)
 
         self.setAcceptDrops(True)
 
-    # ----------------------------------------------------- file handling
+    def _add_section(self, title: str) -> None:
+        lbl = QLabel(title)
+        lbl.setProperty("role", "section")
+        self._insp_layout.addWidget(lbl)
 
-    def _on_drop_clicked(self) -> None:
+    # ── Style toggle ───────────────────────────────────────────────────
+
+    def _set_style(self, style: str) -> None:
+        classic = style == "classic"
+        self.style_classic.setChecked(classic)
+        self.style_modern.setChecked(not classic)
+        self._on_style_toggled()
+
+    def _on_style_toggled(self) -> None:
+        classic = self.style_classic.isChecked()
+        self._classic_section.setVisible(classic)
+        self._modern_section.setVisible(not classic)
+        self.stroke_slider.setEnabled(classic)
+        self.pad_slider.setEnabled(not classic)
+        if not classic:
+            self.text_overlay.set_enabled_for_editing(False)
+        elif self._preview_base is not None:
+            self.text_overlay.set_enabled_for_editing(True)
+        self._schedule_preview()
+
+    # ── File handling ──────────────────────────────────────────────────
+
+    def _on_preview_clicked(self) -> None:
         if self._source_path is None:
             self._open_dialog()
 
     def _open_dialog(self) -> None:
         start_dir = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open image or video", start_dir, OPEN_FILTERS,
+            self, "Open image", start_dir, OPEN_FILTERS,
         )
         if path:
             self._load(Path(path))
@@ -516,177 +675,55 @@ class MainWindow(QMainWindow):
 
     def _load(self, path: Path) -> None:
         suffix = path.suffix.lower()
-        if suffix in ANIMATED_EXTS:
-            self._load_maybe_animated(path)
-        elif suffix in IMAGE_EXTS:
-            self._load_image(path)
-        elif suffix in VIDEO_EXTS:
-            self._load_video(path)
-        else:
+        if suffix not in IMAGE_EXTS:
             QMessageBox.warning(
                 self, "Unsupported file",
-                f"Don't know how to handle {suffix}. Drop an image or a video.",
+                f"Can't handle {suffix}. Drop an image "
+                f"({', '.join(sorted(IMAGE_EXTS))}).",
             )
-
-    def _load_maybe_animated(self, path: Path) -> None:
-        """For .gif / .webp: treat as animated if it has >1 frame; else fall
-        back to the still-image path so the user still sees a preview.
-        """
-        try:
-            with Image.open(path) as probe_img:
-                animated = is_animated(probe_img)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Could not open file", str(exc))
             return
-        if not animated:
-            self._load_image(path)
-            return
-        try:
-            frames, durations = load_animation(path)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Could not open animation", str(exc))
-            return
-        self._source_path = path
-        self._source_kind = "animated"
-        self._preview_base = frames[0]
-        self._animated_frames = frames
-        self._animated_durations = durations
-        self._video_info = None
-        self._trim_start = None
-        self._trim_end = None
-        self.trim_bar.setVisible(False)
-        self.trim_bar.clear()
-        self.video_form_w.setVisible(True)
-        # MP4/trim/audio/fps/scale don't apply to animated images; narrow the
-        # format picker to the two things we can actually produce.
-        self._set_format_options(["WebP", "GIF"])
-        self.keep_audio_check.setEnabled(False)
-        self.fps_combo.setEnabled(False)
-        self.scale_combo.setEnabled(False)
-        self.drop_frame.set_loaded_style(True)
-        total_ms = sum(durations) if durations else 0
-        self._show_loaded(
-            path,
-            f"{frames[0].width}×{frames[0].height} · {len(frames)} frames · {total_ms/1000:.1f}s",
-        )
-        self.status.showMessage(
-            f"{path.name} • animated {len(frames)} frames"
-        )
-        self._refresh_preview()
-        self._update_controls_enabled()
-
-    def _set_format_options(self, options: list[str]) -> None:
-        """Replace the fmt_combo contents, preserving the current selection
-        if it still exists in the new list."""
-        current = self.fmt_combo.currentText()
-        self.fmt_combo.blockSignals(True)
-        self.fmt_combo.clear()
-        self.fmt_combo.addItems(options)
-        idx = self.fmt_combo.findText(current)
-        if idx >= 0:
-            self.fmt_combo.setCurrentIndex(idx)
-        self.fmt_combo.blockSignals(False)
-        self._on_format_changed(self.fmt_combo.currentText())
-
-    def _load_image(self, path: Path) -> None:
         try:
             img = Image.open(path).convert("RGB")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Could not open image", str(exc))
             return
         self._source_path = path
-        self._source_kind = "image"
         self._preview_base = img
-        self._animated_frames = None
-        self._animated_durations = None
-        self._video_info = None
-        self._trim_start = None
-        self._trim_end = None
-        self.trim_bar.setVisible(False)
-        self.trim_bar.clear()
-        self.video_form_w.setVisible(False)
-        self.drop_frame.set_loaded_style(True)
-        self._show_loaded(path, f"{img.width}×{img.height}")
-        self.status.showMessage(f"{path.name} • {img.width}×{img.height}")
-        self._refresh_preview()
-        self._update_controls_enabled()
-
-    def _load_video(self, path: Path) -> None:
-        try:
-            info = ff.probe(path)
-        except ff.FFmpegMissingError as exc:
-            QMessageBox.critical(self, "Missing dependency", str(exc))
-            return
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Could not open video", str(exc))
-            return
-        frame_path = Path(self._tempdir.name) / "frame.jpg"
-        try:
-            ff.extract_frame(path, info.duration / 2, frame_path)
-            frame = Image.open(frame_path).convert("RGB")
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Could not preview video", str(exc))
-            return
-        self._source_path = path
-        self._source_kind = "video"
-        self._preview_base = frame
-        self._animated_frames = None
-        self._animated_durations = None
-        self._video_info = info
-        self._trim_start = None
-        self._trim_end = None
-        self.trim_bar.set_duration(info.duration)
-        self.trim_bar.setVisible(True)
-        self.video_form_w.setVisible(True)
-        self._set_format_options(["WebP", "GIF", "MP4"])
-        self.fps_combo.setEnabled(True)
-        self.scale_combo.setEnabled(True)
-        self.drop_frame.set_loaded_style(True)
-        self._show_loaded(
-            path,
-            f"{info.width}×{info.height} · {info.duration:.1f}s",
-        )
-        self.status.showMessage(
-            f"{path.name} • {info.width}×{info.height} @ {info.fps:.2f}fps • {info.duration:.2f}s"
-        )
-        self._refresh_preview()
-        self._update_controls_enabled()
-
-    def _show_loaded(self, path: Path, meta: str) -> None:
-        self.loaded_name.setText(f"<b>{path.name}</b>  <span style='color:#7a8294'>· {meta}</span>")
-        self.loaded_name.setToolTip(str(path))
-        self.loaded_bar.setVisible(True)
-
-    def _clear_source(self) -> None:
-        if self._export_worker is not None:
-            try:
-                self._export_worker.cancel()
-            except Exception:
-                pass
-        self._source_path = None
-        self._source_kind = None
-        self._preview_base = None
-        self._animated_frames = None
-        self._animated_durations = None
-        self._video_info = None
-        self._trim_start = None
-        self._trim_end = None
         self._top_pos = None
         self._bottom_pos = None
-        self.loaded_bar.setVisible(False)
-        self.video_form_w.setVisible(False)
-        self.trim_bar.setVisible(False)
-        self.trim_bar.clear()
-        self.drop_frame.set_loaded_style(False)
+        self._top_size_pct = None
+        self._bottom_size_pct = None
+        self._top_rotation = 0.0
+        self._bottom_rotation = 0.0
+        self.file_name_label.setText(path.name)
+        self.file_meta_label.setText(f"{img.width}×{img.height}")
+        self.status_doc.setText(f"{img.width}×{img.height}")
+        self.drop_zone.hide()
+        self.preview_label.show()
+        self._status("Loaded")
+        self._refresh_preview()
+        self._update_controls_enabled()
+
+    def _clear_source(self) -> None:
+        self._source_path = None
+        self._preview_base = None
+        self._top_pos = None
+        self._bottom_pos = None
+        self._top_size_pct = None
+        self._bottom_size_pct = None
+        self._top_rotation = 0.0
+        self._bottom_rotation = 0.0
+        self.file_name_label.setText("No image — drop a file or click Open")
+        self.file_meta_label.setText("—")
+        self.status_doc.setText("—")
         self.preview_label.clear()
-        self.preview_label.setText("Click or drop an image or video here")
+        self.preview_label.hide()
+        self.text_overlay.hide()
+        self.drop_zone.show()
         self.top_edit.clear()
         self.bottom_edit.clear()
         self.caption_edit.clear()
-        self.progress.setValue(0)
-        self.progress.setFormat("%p%")
-        self._set_format_options(["WebP", "GIF", "MP4"])
-        self.status.showMessage("Cleared", 3000)
+        self._status("Cleared")
         self._update_controls_enabled()
 
     def _on_load_font(self) -> None:
@@ -696,32 +733,40 @@ class MainWindow(QMainWindow):
         if not path:
             return
         p = Path(path)
-        label = p.stem
-        self.font_combo.addItem(label, str(p))
+        self.font_combo.addItem(p.stem, str(p))
         self.font_combo.setCurrentIndex(self.font_combo.count() - 1)
 
-    # ----------------------------------------------------------- styling
+    def _on_crop_clicked(self) -> None:
+        if self._preview_base is None:
+            return
+        dlg = CropDialog(self._preview_base, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        cropped = dlg.cropped_image()
+        if cropped.width < 1 or cropped.height < 1:
+            return
+        self._preview_base = cropped
+        self._top_pos = None
+        self._bottom_pos = None
+        self._top_rotation = 0.0
+        self._bottom_rotation = 0.0
+        self.file_meta_label.setText(f"{cropped.width}×{cropped.height} (cropped)")
+        self.status_doc.setText(f"{cropped.width}×{cropped.height}")
+        self._status("Cropped")
+        self._refresh_preview()
 
-    def _on_style_toggled(self) -> None:
-        classic = self.style_classic.isChecked()
-        self.top_label_row.setVisible(classic)
-        self.top_edit.setVisible(classic)
-        self.bottom_label_row.setVisible(classic)
-        self.bottom_edit.setVisible(classic)
-        self.caption_label_row.setVisible(not classic)
-        self.caption_edit.setVisible(not classic)
-        self.uppercase_check.setVisible(classic)
-        self.stroke_spin.setEnabled(classic)
-        self.pad_spin.setEnabled(not classic)
-        self._schedule_preview()
+    def _on_reset_text(self) -> None:
+        self._top_pos = None
+        self._bottom_pos = None
+        self._top_size_pct = None
+        self._bottom_size_pct = None
+        self._top_rotation = 0.0
+        self._bottom_rotation = 0.0
+        self.text_overlay.clear_active()
+        self._status("Reset text transforms")
+        self._refresh_preview()
 
-    def _on_format_changed(self, fmt: str) -> None:
-        f = fmt.lower()
-        self.webp_quality.setEnabled(f == "webp")
-        self.fps_combo.setEnabled(f in ("gif", "webp"))
-        self.keep_audio_check.setEnabled(f == "mp4")
-
-    # ------------------------------------------------------------ preview
+    # ── Preview ────────────────────────────────────────────────────────
 
     def _current_spec(self) -> MemeSpec:
         font_data = self.font_combo.currentData()
@@ -732,15 +777,19 @@ class MainWindow(QMainWindow):
             bottom=self.bottom_edit.toPlainText(),
             caption=self.caption_edit.toPlainText(),
             font_path=font_path,
-            font_scale=self.size_spin.value() / 100.0,
-            stroke_ratio=self.stroke_spin.value() / 100.0,
-            padding_scale=self.pad_spin.value() / 100.0,
+            font_scale=self.size_slider.value() / 100.0,
+            stroke_ratio=self.stroke_slider.value() / 100.0,
+            padding_scale=self.pad_slider.value() / 100.0,
             top_color=self.top_swatch.color(),
             bottom_color=self.bottom_swatch.color(),
             caption_color=self.caption_swatch.color(),
             uppercase=self.uppercase_check.isChecked(),
             top_pos=self._top_pos,
             bottom_pos=self._bottom_pos,
+            top_size_pct=self._top_size_pct,
+            bottom_size_pct=self._bottom_size_pct,
+            top_rotation=self._top_rotation,
+            bottom_rotation=self._bottom_rotation,
         )
 
     def _schedule_preview(self) -> None:
@@ -754,12 +803,14 @@ class MainWindow(QMainWindow):
         try:
             rendered = render(self._preview_base, self._current_spec())
         except Exception as exc:  # noqa: BLE001
-            self.status.showMessage(f"Preview error: {exc}", 4000)
+            self._status(f"Preview error: {exc}")
             return
         self.preview_label.setText("")
-        buf = io.BytesIO()
-        rendered.save(buf, format="PNG")
-        image = QImage.fromData(buf.getvalue(), "PNG")
+        if rendered.mode != "RGB":
+            rendered = rendered.convert("RGB")
+        raw = rendered.tobytes("raw", "RGB")
+        image = QImage(raw, rendered.width, rendered.height,
+                       3 * rendered.width, QImage.Format.Format_RGB888)
         pixmap = QPixmap.fromImage(image)
         scaled = pixmap.scaled(
             self.preview_label.size(),
@@ -767,36 +818,90 @@ class MainWindow(QMainWindow):
             Qt.SmoothTransformation,
         )
         self.preview_label.setPixmap(scaled)
-        # Cache the pixmap's on-label geometry so mouse coords can be mapped
-        # back to source-image pixels. The label centres the pixmap, which is
-        # how Qt draws it when the widget is larger than the pixmap.
         lw, lh = self.preview_label.width(), self.preview_label.height()
         pw, ph = scaled.width(), scaled.height()
-        self._pixmap_rect = QRect((lw - pw) // 2, (lh - ph) // 2, pw, ph)
-        # For classic style the rendered size matches the source; for modern
-        # the band shifts the image down by the band height. Hit-testing only
-        # runs in classic mode so source size is enough.
+        self._pixmap_rect = QRectF((lw - pw) / 2, (lh - ph) / 2, pw, ph)
         self._pixmap_src_size = (rendered.width, rendered.height)
+        self._sync_overlay()
+
+    def _sync_overlay(self) -> None:
+        if self._preview_base is None or not self.style_classic.isChecked():
+            self.text_overlay.hide()
+            return
+        self.text_overlay.show()
+        self.text_overlay.setGeometry(
+            0, 0, self.preview_label.width(), self.preview_label.height(),
+        )
+        self.text_overlay.set_image_size(self._pixmap_src_size)
+        self.text_overlay.set_display_rect(self._pixmap_rect)
+        spec = self._current_spec()
+        for which in ("top", "bottom"):
+            geom = classic_block_geometry(self._pixmap_src_size, spec, which)
+            if geom is None:
+                self.text_overlay.set_block(which, BlockGeom(has_text=False))
+                continue
+            cx, cy, w, h, rot = geom
+            size_pct = (
+                self._top_size_pct if which == "top" else self._bottom_size_pct
+            )
+            if size_pct is None:
+                size_pct = self.size_slider.value()
+            self.text_overlay.set_block(which, BlockGeom(
+                cx=cx, cy=cy, width=w, height=h, rotation=rot,
+                has_text=True, size_pct=size_pct,
+            ))
+
+    def eventFilter(self, obj, event):  # noqa: ANN001
+        if obj is self.preview_label and event.type() == QEvent.Resize:
+            self.text_overlay.setGeometry(
+                0, 0, self.preview_label.width(), self.preview_label.height(),
+            )
+            if self._preview_base is not None:
+                self._refresh_preview()
+        return super().eventFilter(obj, event)
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001
         super().resizeEvent(event)
         if self._preview_base is not None:
             self._refresh_preview()
 
-    # -------------------------------------------------------------- export
+    # ── Overlay signal handlers ────────────────────────────────────────
+
+    def _on_text_position_changed(self, which: str, cx: float, cy: float) -> None:
+        if which == "top":
+            self._top_pos = (cx, cy)
+        elif which == "bottom":
+            self._bottom_pos = (cx, cy)
+        self._refresh_preview()
+
+    def _on_text_size_changed(self, which: str, size_pct: float) -> None:
+        if which == "top":
+            self._top_size_pct = size_pct
+        elif which == "bottom":
+            self._bottom_size_pct = size_pct
+        self._status(f"{which} text size: {size_pct:.1f}%")
+        self._refresh_preview()
+
+    def _on_text_rotation_changed(self, which: str, deg: float) -> None:
+        if which == "top":
+            self._top_rotation = deg
+        elif which == "bottom":
+            self._bottom_rotation = deg
+        self._status(f"{which} rotation: {deg:.0f}°")
+        self._refresh_preview()
+
+    def _on_active_block_changed(self, which: str) -> None:
+        if which:
+            self._status(f"Editing {which} text — drag to move, corner to resize, bubble to rotate")
+
+    def _on_global_size_changed(self) -> None:
+        self._schedule_preview()
+
+    # ── Export ─────────────────────────────────────────────────────────
 
     def _on_export_clicked(self) -> None:
         if self._source_path is None or self._preview_base is None:
             return
-        if self._source_kind == "image":
-            self._export_image()
-        elif self._source_kind == "animated":
-            self._export_animated()
-        else:
-            self._export_video()
-
-    def _export_image(self) -> None:
-        assert self._source_path is not None
         suggested = str(self._source_path.with_name(self._source_path.stem + "-meme.png"))
         path, _ = QFileDialog.getSaveFileName(
             self, "Save meme", suggested,
@@ -810,229 +915,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Save failed", str(exc))
             return
-        self.status.showMessage(f"Saved {out.name}", 6000)
-        self.progress.setValue(100)
-
-    def _export_animated(self) -> None:
-        assert self._source_path is not None
-        assert self._animated_frames is not None and self._animated_durations is not None
-        fmt = self.fmt_combo.currentText().lower()
-        if fmt not in ("gif", "webp"):
-            QMessageBox.warning(self, "Unsupported", "Animated export supports GIF or WebP")
-            return
-        suggested = str(self._source_path.with_name(self._source_path.stem + f"-meme.{fmt}"))
-        path, _ = QFileDialog.getSaveFileName(
-            self, f"Save {fmt.upper()}", suggested, f"{fmt.upper()} (*.{fmt})",
-        )
-        if not path:
-            return
-        job = AnimatedJob(
-            frames=self._animated_frames,
-            durations=self._animated_durations,
-            spec=self._current_spec(),
-            output=Path(path),
-            fmt=fmt,
-        )
-        self.progress.setValue(0)
-        self.progress.setFormat("rendering frames…")
-        self.export_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-        self.status.showMessage("Exporting…")
-
-        thread, worker = start_animated_export(job)
-        worker.progress.connect(self._on_progress, Qt.QueuedConnection)
-        worker.log.connect(self._on_log, Qt.QueuedConnection)
-        worker.finished.connect(self._on_export_done, Qt.QueuedConnection)
-        worker.failed.connect(self._on_export_failed, Qt.QueuedConnection)
-        thread.finished.connect(self._reset_export)
-        self._export_thread = thread
-        self._export_worker = worker
-        thread.start()
-
-    def _export_video(self) -> None:
-        assert self._source_path is not None and self._video_info is not None
-        fmt = self.fmt_combo.currentText().lower()
-        ext = {"gif": "gif", "webp": "webp", "mp4": "mp4"}[fmt]
-        suggested = str(self._source_path.with_suffix(f".{ext}"))
-        suggested = str(Path(suggested).with_stem(Path(suggested).stem + "-meme"))
-        path, _ = QFileDialog.getSaveFileName(
-            self, f"Save {ext.upper()}", suggested, f"{ext.upper()} (*.{ext})",
-        )
-        if not path:
-            return
-        job = VideoJob(
-            source=self._source_path,
-            output=Path(path),
-            width=self._video_info.width,
-            height=self._video_info.height,
-            spec=self._current_spec(),
-            fmt=fmt,  # type: ignore[arg-type]
-            fps=int(self.fps_combo.currentText()),
-            scale_pct=int(self.scale_combo.currentText()),
-            webp_quality=self.webp_quality.value(),
-            start=self._trim_start,
-            end=self._trim_end,
-            keep_audio=self.keep_audio_check.isChecked(),
-        )
-
-        self.progress.setValue(0)
-        self.progress.setFormat("starting…")
-        self.export_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-        self.status.showMessage("Exporting…")
-
-        thread, worker = start_export(job)
-        worker.progress.connect(self._on_progress, Qt.QueuedConnection)
-        worker.log.connect(self._on_log, Qt.QueuedConnection)
-        worker.finished.connect(self._on_export_done, Qt.QueuedConnection)
-        worker.failed.connect(self._on_export_failed, Qt.QueuedConnection)
-        thread.finished.connect(self._reset_export)
-        self._export_thread = thread
-        self._export_worker = worker
-        thread.start()
-
-    def _on_cancel_clicked(self) -> None:
-        if self._export_worker is not None:
-            self._export_worker.cancel()
-            self.status.showMessage("Cancelling…")
-
-    def _on_progress(self, pct: int) -> None:
-        self.progress.setValue(pct)
-        self.progress.setFormat("%p%")
-
-    def _on_log(self, msg: str) -> None:
-        self.status.showMessage(msg, 4000)
-
-    def _on_export_done(self, out: Path) -> None:
         size_kb = out.stat().st_size / 1024
-        if size_kb < 1024:
-            size = f"{size_kb:.1f} KB"
-        else:
-            size = f"{size_kb/1024:.1f} MB"
-        self.status.showMessage(f"Saved {out.name} ({size})", 8000)
-        self.progress.setValue(100)
-        self.progress.setFormat("%p%")
-
-    def _on_export_failed(self, msg: str) -> None:
-        self.status.showMessage(f"Failed: {msg}", 8000)
-        QMessageBox.warning(self, "Export failed", msg)
-
-    def _reset_export(self) -> None:
-        self._export_thread = None
-        self._export_worker = None
-        self.export_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
-
-    # -------------------------------------------------------------- misc
-
-    def _update_controls_enabled(self) -> None:
-        loaded = self._preview_base is not None
-        for w in (
-            self.style_classic, self.style_modern,
-            self.top_edit, self.bottom_edit, self.caption_edit,
-            self.top_swatch, self.bottom_swatch, self.caption_swatch,
-            self.uppercase_check,
-            self.font_combo, self.add_font_btn,
-            self.size_spin, self.stroke_spin, self.pad_spin,
-            self.export_btn, self.copy_btn,
-        ):
-            w.setEnabled(loaded)
-        self._on_style_toggled()
-
-    # --- preview drag -----------------------------------------------
-
-    def _label_to_norm(self, p: QPoint) -> tuple[float, float] | None:
-        """Convert a label-local QPoint into normalised (nx, ny) coordinates
-        within the source image. Returns None if the point is outside the
-        rendered pixmap.
-        """
-        if self._pixmap_rect.isEmpty() or not self._pixmap_src_size[0]:
-            return None
-        rx = p.x() - self._pixmap_rect.x()
-        ry = p.y() - self._pixmap_rect.y()
-        if not (0 <= rx <= self._pixmap_rect.width() and 0 <= ry <= self._pixmap_rect.height()):
-            return None
-        nx = rx / self._pixmap_rect.width()
-        ny = ry / self._pixmap_rect.height()
-        return nx, ny
-
-    def _hit_test_text(self, nx: float, ny: float) -> str | None:
-        """Return 'top', 'bottom', or None based on normalised coords."""
-        if self._preview_base is None or not self.style_classic.isChecked():
-            return None
-        spec = self._current_spec()
-        w, h = self._preview_base.size
-        for which in ("top", "bottom"):
-            rect = classic_block_rect((w, h), spec, which)  # type: ignore[arg-type]
-            if rect is None:
-                continue
-            rx, ry, rw, rh = rect
-            px = nx * w
-            py = ny * h
-            if rx <= px <= rx + rw and ry <= py <= ry + rh:
-                return which
-        return None
-
-    def _on_preview_pressed(self, p: QPoint) -> None:
-        # Click on the empty-state preview opens the file picker — restores
-        # the behaviour the DropFrame's own click would have done before the
-        # label started accepting mouse events.
-        if self._source_path is None:
-            self._open_dialog()
-            return
-        norm = self._label_to_norm(p)
-        if norm is None:
-            return
-        which = self._hit_test_text(*norm)
-        if which is None:
-            return
-        # grab offset (in normalised space) so the drag doesn't snap the
-        # block's centre to the cursor — it follows the grab point instead.
-        spec = self._current_spec()
-        current = spec.top_pos if which == "top" else spec.bottom_pos
-        if current is None:
-            # use the default anchor as a starting centre
-            current = (0.5, 0.08) if which == "top" else (0.5, 0.92)
-        self._drag_target = which
-        self._drag_grab = (current[0] - norm[0], current[1] - norm[1])
-        self.preview_label.setCursor(Qt.ClosedHandCursor)
-        self.status.showMessage(f"Dragging {which} text…", 2000)
-
-    def _on_preview_moved(self, p: QPoint) -> None:
-        norm = self._label_to_norm(p)
-        if self._drag_target is None:
-            if norm is None:
-                self.preview_label.unsetCursor()
-                return
-            hit = self._hit_test_text(*norm)
-            if hit:
-                self.preview_label.setCursor(Qt.OpenHandCursor)
-            else:
-                self.preview_label.unsetCursor()
-            return
-        if norm is None:
-            return
-        cx = max(0.0, min(1.0, norm[0] + self._drag_grab[0]))
-        cy = max(0.0, min(1.0, norm[1] + self._drag_grab[1]))
-        if self._drag_target == "top":
-            self._top_pos = (cx, cy)
-        else:
-            self._bottom_pos = (cx, cy)
-        self._refresh_preview()
-
-    def _on_preview_released(self, _p: QPoint) -> None:
-        if self._drag_target is not None:
-            self._drag_target = None
-            self.preview_label.unsetCursor()
-
-    def _on_trim_changed(self, start: float, end: float) -> None:
-        """Persist trim range; update status. The preview frame is fixed at
-        the middle of the full clip, so we don't re-render on trim changes."""
-        self._trim_start = start if start > 0 else None
-        self._trim_end = end if self._video_info and end < self._video_info.duration else None
-        self.status.showMessage(
-            f"Trim: {start:.2f}s – {end:.2f}s  ({end - start:.2f}s)", 4000,
-        )
+        size = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+        self._status(f"Saved {out.name} ({size})")
 
     def _on_copy_clicked(self) -> None:
         if self._preview_base is None:
@@ -1046,50 +931,63 @@ class MainWindow(QMainWindow):
         rendered.save(buf, format="PNG")
         image = QImage.fromData(buf.getvalue(), "PNG")
         QApplication.clipboard().setImage(image)
-        self.status.showMessage("Copied to clipboard", 4000)
+        self._status("Copied to clipboard")
 
-    # --- QSettings --------------------------------------------------
+    # ── Misc ───────────────────────────────────────────────────────────
+
+    def _status(self, msg: str) -> None:
+        self.status_msg.setText(msg)
+
+    def _update_controls_enabled(self) -> None:
+        loaded = self._preview_base is not None
+        for w in (
+            self.style_classic, self.style_modern,
+            self.top_edit, self.bottom_edit, self.caption_edit,
+            self.top_swatch, self.bottom_swatch, self.caption_swatch,
+            self.uppercase_check,
+            self.font_combo, self.add_font_btn,
+            self.size_slider, self.stroke_slider, self.pad_slider,
+            self.export_btn, self.copy_btn,
+            self.crop_btn, self.reset_btn, self.clear_btn,
+        ):
+            w.setEnabled(loaded)
+        self._on_style_toggled()
+
+    # ── Settings ───────────────────────────────────────────────────────
 
     def _load_settings(self) -> None:
         s = self._settings
         style = s.value("style", "classic")
         if style == "modern":
-            self.style_modern.setChecked(True)
+            self._set_style("modern")
+        else:
+            self._set_style("classic")
         font_label = s.value("font_label", "")
         if font_label:
             idx = self.font_combo.findText(font_label)
             if idx >= 0:
                 self.font_combo.setCurrentIndex(idx)
-        self.size_spin.setValue(int(s.value("size", self.size_spin.value())))
-        self.stroke_spin.setValue(int(s.value("stroke", self.stroke_spin.value())))
-        self.pad_spin.setValue(int(s.value("padding", self.pad_spin.value())))
+        self.size_slider.setValue(int(s.value("size", self.size_slider.value())))
+        self.stroke_slider.setValue(int(s.value("stroke", self.stroke_slider.value())))
+        self.pad_slider.setValue(int(s.value("padding", self.pad_slider.value())))
         self.uppercase_check.setChecked(_as_bool(s.value("uppercase", True)))
-        top = _parse_color(s.value("top_color", ""), (255, 255, 255))
-        bottom = _parse_color(s.value("bottom_color", ""), (255, 255, 255))
-        caption = _parse_color(s.value("caption_color", ""), (0, 0, 0))
-        self.top_swatch.set_color(top)
-        self.bottom_swatch.set_color(bottom)
-        self.caption_swatch.set_color(caption)
-        fmt = s.value("video_format", "WebP")
-        idx = self.fmt_combo.findText(fmt)
-        if idx >= 0:
-            self.fmt_combo.setCurrentIndex(idx)
-        self.keep_audio_check.setChecked(_as_bool(s.value("keep_audio", True)))
-        self._on_format_changed(self.fmt_combo.currentText())
+        self.top_swatch.set_color(_parse_color(s.value("top_color", ""), (255, 255, 255)))
+        self.bottom_swatch.set_color(_parse_color(s.value("bottom_color", ""), (255, 255, 255)))
+        self.caption_swatch.set_color(_parse_color(s.value("caption_color", ""), (0, 0, 0)))
 
     def _save_settings(self) -> None:
         s = self._settings
         s.setValue("style", "classic" if self.style_classic.isChecked() else "modern")
         s.setValue("font_label", self.font_combo.currentText())
-        s.setValue("size", self.size_spin.value())
-        s.setValue("stroke", self.stroke_spin.value())
-        s.setValue("padding", self.pad_spin.value())
+        s.setValue("size", self.size_slider.value())
+        s.setValue("stroke", self.stroke_slider.value())
+        s.setValue("padding", self.pad_slider.value())
         s.setValue("uppercase", self.uppercase_check.isChecked())
         s.setValue("top_color", _format_color(self.top_swatch.color()))
         s.setValue("bottom_color", _format_color(self.bottom_swatch.color()))
         s.setValue("caption_color", _format_color(self.caption_swatch.color()))
-        s.setValue("video_format", self.fmt_combo.currentText())
-        s.setValue("keep_audio", self.keep_audio_check.isChecked())
+
+    # ── Window events ──────────────────────────────────────────────────
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
@@ -1103,19 +1001,31 @@ class MainWindow(QMainWindow):
                 event.acceptProposedAction()
                 return
 
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._frameless_resizer.try_press(event):
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._frameless_resizer.try_move(event):
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._frameless_resizer.try_release(event):
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001
+        self._frameless_resizer.clear_hover()
+        super().leaveEvent(event)
+
     def closeEvent(self, event) -> None:  # noqa: ANN001
-        if self._export_worker is not None:
-            try:
-                self._export_worker.cancel()
-            except Exception:
-                pass
-        if self._export_thread is not None and self._export_thread.isRunning():
-            self._export_thread.quit()
-            self._export_thread.wait(2000)
         self._save_settings()
-        self._tempdir.cleanup()
         super().closeEvent(event)
 
+
+# ── Helpers ────────────────────────────────────────────────────────────────
 
 def _as_bool(v: object) -> bool:
     if isinstance(v, bool):
@@ -1136,19 +1046,3 @@ def _parse_color(s: object, default: tuple[int, int, int]) -> tuple[int, int, in
 
 def _format_color(c: tuple[int, int, int]) -> str:
     return f"#{c[0]:02x}{c[1]:02x}{c[2]:02x}"
-
-
-def _labeled_row(text: str, extra: QWidget) -> tuple[QWidget, QLabel]:
-    """Horizontal row with a label on the left and an auxiliary widget on
-    the right. Returns (row_widget, label) so the label can be shown/hidden
-    together with its companion input below.
-    """
-    row = QWidget()
-    layout = QHBoxLayout(row)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(6)
-    label = QLabel(text)
-    layout.addWidget(label)
-    layout.addStretch(1)
-    layout.addWidget(extra)
-    return row, label

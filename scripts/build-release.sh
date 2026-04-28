@@ -14,7 +14,7 @@ cd "$ROOT"
 
 APP_NAME="cove-meme-maker"
 DISPLAY_NAME="Cove Meme Maker"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-2.0.0}"
 ARCH="x86_64"
 DEB_ARCH="amd64"
 RELEASE_DIR="$ROOT/release"
@@ -138,7 +138,7 @@ Version: $VERSION
 Architecture: $DEB_ARCH
 Maintainer: Cove <noreply@cove.local>
 Installed-Size: $INSTALLED_SIZE
-Depends: ffmpeg
+Depends:
 Section: graphics
 Priority: optional
 Description: Offline meme maker for images, GIFs, and videos
