@@ -14,7 +14,7 @@ a = Analysis(
     datas=[
         (str(ASSETS / "cove_icon.png"), "cove_meme_maker/assets"),
     ],
-    hiddenimports=[],
+    hiddenimports=["cove_meme_maker.tab_web"],
     hookspath=[],
     runtime_hooks=[],
     excludes=[
