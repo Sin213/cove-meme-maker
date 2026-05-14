@@ -52,6 +52,7 @@ _SIZE_PCT_MIN =  2.0    # smallest renderable per-block font size (% of image he
 _SIZE_PCT_MAX = 30.0
 _ROTATION_MIN = -180.0  # clockwise degrees
 _ROTATION_MAX =  180.0
+_CROP_MIN_DIM =  0.01   # minimum width or height of crop region (normalised)
 
 # ---------------------------------------------------------------------------
 # Template registry
@@ -140,6 +141,20 @@ html,body{height:100%;overflow:hidden;font-family:"Geist",Inter,ui-sans-serif,sy
 .drag-handle{position:absolute;width:28px;height:28px;border-radius:50%;background:rgba(80,230,207,0.85);color:#0a0a0e;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;cursor:grab;transform:translate(-50%,-50%);pointer-events:all;user-select:none;border:2px solid rgba(255,255,255,0.6)}
 .drag-handle:active{cursor:grabbing;background:rgba(80,230,207,1)}
 .drag-handle.hidden{display:none}
+
+/* Crop overlay */
+#crop-overlay{position:absolute;inset:0;pointer-events:none;display:none}
+#crop-overlay.active{display:block}
+#crop-shade-t,#crop-shade-b,#crop-shade-l,#crop-shade-r{position:absolute;background:rgba(0,0,0,0.55);pointer-events:none}
+#crop-box{position:absolute;border:1.5px solid #50e6cf;box-sizing:border-box;pointer-events:none}
+.crop-handle{position:absolute;width:14px;height:14px;background:#50e6cf;border-radius:2px;pointer-events:all;cursor:nwse-resize}
+#crop-tl{top:-7px;left:-7px;cursor:nwse-resize}
+#crop-tr{top:-7px;right:-7px;cursor:nesw-resize}
+#crop-bl{bottom:-7px;left:-7px;cursor:nesw-resize}
+#crop-br{bottom:-7px;right:-7px;cursor:nwse-resize}
+.crop-btn{background:transparent;color:#9a9aae;border:1px solid rgba(255,255,255,0.10);border-radius:6px;padding:0 10px;font-size:12px;height:26px;cursor:pointer;font-family:inherit;white-space:nowrap;flex-shrink:0}
+.crop-btn:disabled{color:#6b6b80;border-color:rgba(255,255,255,0.06);cursor:default}
+.crop-btn.active{color:#50e6cf;border-color:#50e6cf}
 
 #canvas-statusbar{display:flex;align-items:center;gap:8px;padding:0 12px;height:28px;background:rgba(255,255,255,0.012);border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0}
 #status-pulse{width:6px;height:6px;border-radius:3px;background:#3ddc97;flex-shrink:0;transition:background 0.2s}
@@ -231,6 +246,18 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
         <div id="handle-layer">
           <div id="top-handle" class="drag-handle hidden">T</div>
           <div id="bottom-handle" class="drag-handle hidden">B</div>
+        </div>
+        <div id="crop-overlay">
+          <div id="crop-shade-t"></div>
+          <div id="crop-shade-b"></div>
+          <div id="crop-shade-l"></div>
+          <div id="crop-shade-r"></div>
+          <div id="crop-box">
+            <div class="crop-handle" id="crop-tl"></div>
+            <div class="crop-handle" id="crop-tr"></div>
+            <div class="crop-handle" id="crop-bl"></div>
+            <div class="crop-handle" id="crop-br"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -331,6 +358,16 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
         <span class="slider-val" id="pad-val">22%</span>
       </div>
 
+      <div class="sec-divider"></div>
+      <span class="sec-label">Crop / Frame</span>
+      <div style="display:flex;align-items:center;gap:8px;padding:0 12px 12px">
+        <button class="crop-btn" id="crop-toggle-btn" disabled>Enable crop</button>
+        <button class="crop-btn" id="crop-reset-btn" disabled style="margin-left:auto">Reset</button>
+      </div>
+      <div id="crop-readout" style="display:none;padding:0 16px 12px">
+        <span style="font-family:monospace;font-size:11px;color:#6b6b80" id="crop-readout-text"></span>
+      </div>
+
     </div>
 
     <div id="inspector-footer">
@@ -392,6 +429,16 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   var bottomSizeVal = document.getElementById('bottom-size-val');
   var topRotVal     = document.getElementById('top-rot-val');
   var bottomRotVal  = document.getElementById('bottom-rot-val');
+  var cropToggleBtn = document.getElementById('crop-toggle-btn');
+  var cropResetBtn  = document.getElementById('crop-reset-btn');
+  var cropReadout   = document.getElementById('crop-readout');
+  var cropReadoutTx = document.getElementById('crop-readout-text');
+  var cropOverlay   = document.getElementById('crop-overlay');
+  var cropBox       = document.getElementById('crop-box');
+  var cropShadeT    = document.getElementById('crop-shade-t');
+  var cropShadeB    = document.getElementById('crop-shade-b');
+  var cropShadeL    = document.getElementById('crop-shade-l');
+  var cropShadeR    = document.getElementById('crop-shade-r');
 
   var styleMode    = 'classic';
   var currentDataUrl = null;
@@ -400,6 +447,10 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   var topPos    = null;
   var bottomPos = null;
   var dragging  = null;
+  // Crop state: null = no crop; otherwise normalised {x, y, width, height}
+  var cropActive = false;
+  var cropRect   = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
+  var cropDragging = null; // null | 'tl'|'tr'|'bl'|'br'
 
   function setStatus(msg, pulse) {
     statusMsg.textContent = msg;
@@ -438,6 +489,125 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
     bottomRotSl.value  = '0'; bottomRotVal.textContent  = '0\xb0'; fillSlider(bottomRotSl);
   }
 
+  function _resetCrop() {
+    cropActive = false;
+    cropRect   = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
+    cropDragging = null;
+    cropOverlay.classList.remove('active');
+    cropToggleBtn.textContent = 'Enable crop';
+    cropToggleBtn.classList.remove('active');
+    cropToggleBtn.disabled = true;
+    cropResetBtn.disabled = true;
+    cropReadout.style.display = 'none';
+  }
+
+  function _updateCropOverlay() {
+    if (!cropActive) return;
+    var imgRect  = previewImg.getBoundingClientRect();
+    var wrapRect = previewWrap.getBoundingClientRect();
+    var ox = imgRect.left - wrapRect.left;
+    var oy = imgRect.top  - wrapRect.top;
+    var iw = imgRect.width;
+    var ih = imgRect.height;
+    var bx = ox + cropRect.x * iw;
+    var by = oy + cropRect.y * ih;
+    var bw = cropRect.width  * iw;
+    var bh = cropRect.height * ih;
+    // shades
+    cropShadeT.style.cssText = 'top:' + oy + 'px;left:' + ox + 'px;width:' + iw + 'px;height:' + (by - oy) + 'px';
+    cropShadeB.style.cssText = 'top:' + (by + bh) + 'px;left:' + ox + 'px;width:' + iw + 'px;bottom:' + (wrapRect.height - oy - ih) + 'px';
+    cropShadeL.style.cssText = 'top:' + by + 'px;left:' + ox + 'px;width:' + (bx - ox) + 'px;height:' + bh + 'px';
+    cropShadeR.style.cssText = 'top:' + by + 'px;left:' + (bx + bw) + 'px;right:' + (wrapRect.width - ox - iw) + 'px;height:' + bh + 'px';
+    // box
+    cropBox.style.cssText = 'left:' + bx + 'px;top:' + by + 'px;width:' + bw + 'px;height:' + bh + 'px';
+    // readout
+    cropReadoutTx.textContent =
+      'x:' + cropRect.x.toFixed(2) + ' y:' + cropRect.y.toFixed(2) +
+      ' w:' + cropRect.width.toFixed(2) + ' h:' + cropRect.height.toFixed(2);
+  }
+
+  cropToggleBtn.addEventListener('click', function () {
+    if (!currentDataUrl || cropToggleBtn.disabled) return;
+    cropActive = !cropActive;
+    if (cropActive) {
+      cropOverlay.classList.add('active');
+      cropToggleBtn.textContent = 'Disable crop';
+      cropToggleBtn.classList.add('active');
+      cropResetBtn.disabled = false;
+      cropReadout.style.display = '';
+      // Always calibrate against the source image. If previewImg currently
+      // shows a rendered output (e.g. after a modern-mode render), restore
+      // the source first and let layout settle before computing the overlay.
+      if (previewImg.src !== currentDataUrl) {
+        previewImg.src = currentDataUrl;
+        requestAnimationFrame(function () { if (cropActive) _updateCropOverlay(); });
+      } else {
+        _updateCropOverlay();
+      }
+    } else {
+      cropOverlay.classList.remove('active');
+      cropToggleBtn.textContent = 'Enable crop';
+      cropToggleBtn.classList.remove('active');
+      cropResetBtn.disabled = true;
+      cropReadout.style.display = 'none';
+    }
+  });
+
+  cropResetBtn.addEventListener('click', function () {
+    cropRect = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
+    _updateCropOverlay();
+  });
+
+  (function () {
+    var handles = [
+      document.getElementById('crop-tl'),
+      document.getElementById('crop-tr'),
+      document.getElementById('crop-bl'),
+      document.getElementById('crop-br'),
+    ];
+    var corners = ['tl', 'tr', 'bl', 'br'];
+    var MIN_DIM = 0.01;
+    corners.forEach(function (corner, i) {
+      handles[i].addEventListener('mousedown', function (e) {
+        e.preventDefault(); e.stopPropagation(); cropDragging = corner;
+      });
+      handles[i].addEventListener('touchstart', function (e) {
+        e.preventDefault(); e.stopPropagation(); cropDragging = corner;
+      }, { passive: false });
+    });
+    function _onCropMove(clientX, clientY) {
+      if (!cropDragging) return;
+      var imgRect = previewImg.getBoundingClientRect();
+      var nx = Math.max(0, Math.min(1, (clientX - imgRect.left) / imgRect.width));
+      var ny = Math.max(0, Math.min(1, (clientY - imgRect.top)  / imgRect.height));
+      var r = cropRect;
+      if (cropDragging === 'tl') {
+        var nx2 = Math.min(nx, r.x + r.width  - MIN_DIM);
+        var ny2 = Math.min(ny, r.y + r.height - MIN_DIM);
+        r.width  += r.x - nx2;  r.x = nx2;
+        r.height += r.y - ny2;  r.y = ny2;
+      } else if (cropDragging === 'tr') {
+        var ny2 = Math.min(ny, r.y + r.height - MIN_DIM);
+        r.width  = Math.max(MIN_DIM, nx - r.x);
+        r.height += r.y - ny2; r.y = ny2;
+      } else if (cropDragging === 'bl') {
+        var nx2 = Math.min(nx, r.x + r.width - MIN_DIM);
+        r.height = Math.max(MIN_DIM, ny - r.y);
+        r.width += r.x - nx2; r.x = nx2;
+      } else {
+        r.width  = Math.max(MIN_DIM, nx - r.x);
+        r.height = Math.max(MIN_DIM, ny - r.y);
+      }
+      _updateCropOverlay();
+    }
+    window.addEventListener('mousemove', function (e) { if (cropDragging) _onCropMove(e.clientX, e.clientY); });
+    window.addEventListener('mouseup',   function ()  { cropDragging = null; });
+    window.addEventListener('touchmove', function (e) {
+      if (cropDragging) { e.preventDefault(); var t = e.touches[0]; _onCropMove(t.clientX, t.clientY); }
+    }, { passive: false });
+    window.addEventListener('touchend',  function () { cropDragging = null; });
+  })();
+
   function _onDragMove(clientX, clientY) {
     if (!dragging) return;
     var imgRect = previewImg.getBoundingClientRect();
@@ -467,6 +637,7 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   window.addEventListener('resize', function () {
     if (!topHandle.classList.contains('hidden'))    _placeHandle(topHandle,    topPos    ? topPos[0]    : 0.5, topPos    ? topPos[1]    : 0.10);
     if (!bottomHandle.classList.contains('hidden')) _placeHandle(bottomHandle, bottomPos ? bottomPos[0] : 0.5, bottomPos ? bottomPos[1] : 0.90);
+    if (cropActive) _updateCropOverlay();
   });
 
   function _deselectTemplates() {
@@ -508,6 +679,8 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
             setStatus('Template loaded — press Render');
             _resetHandles();
             _resetSizeRot();
+            _resetCrop();
+            cropToggleBtn.disabled = false;
             if (styleMode === 'classic') {
               var tok = myToken;
               requestAnimationFrame(function () { if (tok === renderToken) _showHandles(); });
@@ -673,6 +846,8 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
         setStatus('Image loaded — press Render');
         _resetHandles();
         _resetSizeRot();
+        _resetCrop();
+        cropToggleBtn.disabled = false;
         if (styleMode === 'classic') {
           var tok = myLoadToken;
           requestAnimationFrame(function () { if (tok === renderToken) _showHandles(); });
@@ -711,6 +886,7 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
     _deselectTemplates();
     _resetHandles();
     _resetSizeRot();
+    _resetCrop();
     currentDataUrl = null;
     lastPng = null;
     fileInput.value = '';
@@ -750,6 +926,15 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
     renderBtn.disabled = true;
     exportBtn.disabled = true;
     copyBtn.disabled   = true;
+    // When crop is active, convert source-normalised handle positions into
+    // crop-local coordinates (the renderer applies crop before placing text).
+    // Does not mutate the stored drag state; null handles pass through as null.
+    function _toCropLocal(pos) {
+      if (!pos) return null;
+      var lx = Math.max(0, Math.min(1, (pos[0] - cropRect.x) / cropRect.width));
+      var ly = Math.max(0, Math.min(1, (pos[1] - cropRect.y) / cropRect.height));
+      return [lx, ly];
+    }
     fetch('/render', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -766,12 +951,13 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
         font_scale:    parseInt(sizeSl.value, 10),
         stroke_ratio:  parseInt(strokeSl.value, 10),
         padding_scale: parseInt(padSl.value, 10),
-        top_pos:        topPos,
-        bottom_pos:     bottomPos,
+        top_pos:        cropActive ? _toCropLocal(topPos)    : topPos,
+        bottom_pos:     cropActive ? _toCropLocal(bottomPos) : bottomPos,
         top_size_pct:    topSizeSl.value === '0' ? null : parseInt(topSizeSl.value, 10),
         bottom_size_pct: bottomSizeSl.value === '0' ? null : parseInt(bottomSizeSl.value, 10),
         top_rotation:    parseInt(topRotSl.value, 10),
         bottom_rotation: parseInt(bottomRotSl.value, 10),
+        crop: cropActive ? { x: cropRect.x, y: cropRect.y, width: cropRect.width, height: cropRect.height } : null,
       }),
     })
     .then(function (r) {
@@ -785,7 +971,16 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
     .then(function (data) {
       if (myToken !== renderToken) return;
       lastPng = data.preview_b64;
-      previewImg.src = 'data:image/png;base64,' + data.preview_b64;
+      // When crop is active keep the source image in previewImg so the crop
+      // overlay stays calibrated to the original geometry. The rendered output
+      // is available via Export/Copy; lastPng already holds it.
+      if (cropActive) {
+        previewImg.src = currentDataUrl;
+        var _raf_tok = myToken;
+        requestAnimationFrame(function () { if (_raf_tok === renderToken) _updateCropOverlay(); });
+      } else {
+        previewImg.src = 'data:image/png;base64,' + data.preview_b64;
+      }
       previewWrap.style.display = 'flex';
       dropZone.style.display    = 'none';
       exportBtn.disabled = false;
@@ -911,6 +1106,41 @@ def _parse_rotation(val: object) -> float:
     if not math.isfinite(v):
         raise ValueError("rotation must be finite")
     return max(_ROTATION_MIN, min(_ROTATION_MAX, v))
+
+
+def _parse_crop(val: object) -> "tuple[float, float, float, float] | None":
+    """Parse a normalised crop region {x, y, width, height}.
+    Returns None when absent. Clamps each field to [0, 1].
+    Raises ValueError for present-but-malformed input or zero-area region."""
+    if val is None:
+        return None
+    if not isinstance(val, dict):
+        raise ValueError("crop must be an object")
+    for key in ("x", "y", "width", "height"):
+        if key not in val:
+            raise ValueError(f"crop missing field: {key}")
+    try:
+        x  = float(val["x"])
+        y  = float(val["y"])
+        cw = float(val["width"])
+        ch = float(val["height"])
+    except (TypeError, ValueError):
+        raise ValueError("crop fields must be numbers")
+    for v in (x, y, cw, ch):
+        if not math.isfinite(v):
+            raise ValueError("crop fields must be finite")
+    x  = max(0.0, min(1.0, x))
+    y  = max(0.0, min(1.0, y))
+    cw = max(0.0, min(1.0, cw))
+    ch = max(0.0, min(1.0, ch))
+    # Compute the effective in-bounds extent so x+eff_w and y+eff_h never
+    # exceed 1.0. Reject if either effective dimension is too small, which
+    # catches e.g. x=1.0 (nothing left in the image) before the renderer sees it.
+    eff_w = min(1.0, x + cw) - x
+    eff_h = min(1.0, y + ch) - y
+    if eff_w < _CROP_MIN_DIM or eff_h < _CROP_MIN_DIM:
+        raise ValueError("crop region is too small")
+    return (x, y, eff_w, eff_h)
 
 
 def _build_html(run_id: str) -> bytes:
@@ -1088,6 +1318,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._json_error(400, f"invalid size/rotation: {exc}")
             return
 
+        # Crop region — optional normalised {x, y, width, height}.
+        try:
+            crop = _parse_crop(req.get("crop"))
+        except ValueError as exc:
+            self._json_error(400, f"invalid crop: {exc}")
+            return
+
         # --- render ---
         try:
             from PIL import Image
@@ -1115,6 +1352,7 @@ class _Handler(BaseHTTPRequestHandler):
                 bottom_size_pct=bottom_size_pct,
                 top_rotation=top_rotation,
                 bottom_rotation=bottom_rotation,
+                crop=crop,
             )
             result = _render(source, spec)
             buf = io.BytesIO()

@@ -59,6 +59,9 @@ class MemeSpec:
     # Clockwise rotation in degrees applied around the block centre.
     top_rotation: float = 0.0
     bottom_rotation: float = 0.0
+    # Normalised crop region (x, y, width, height) in [0, 1] relative to the
+    # source image. Applied before text rendering. None means no crop.
+    crop: tuple[float, float, float, float] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +70,8 @@ class MemeSpec:
 
 def render(source: Image.Image | Path, spec: MemeSpec) -> Image.Image:
     img = _load(source).convert("RGB")
+    if spec.crop is not None:
+        img = _apply_crop(img, spec.crop)
     if spec.style == "classic":
         return _render_classic(img, spec)
     return _render_modern(img, spec)
@@ -92,6 +97,21 @@ def _load(source: Image.Image | Path) -> Image.Image:
     if isinstance(source, Image.Image):
         return source.copy()
     return Image.open(source)
+
+
+def _apply_crop(img: Image.Image, crop: tuple[float, float, float, float]) -> Image.Image:
+    w, h = img.size
+    x, y, cw, ch = crop
+    left = int(round(x * w))
+    top = int(round(y * h))
+    right = int(round((x + cw) * w))
+    bottom = int(round((y + ch) * h))
+    # Clamp origin strictly inside the image so right/bottom stay ≤ w/h.
+    left = max(0, min(left, w - 1))
+    top = max(0, min(top, h - 1))
+    right = max(left + 1, min(right, w))
+    bottom = max(top + 1, min(bottom, h))
+    return img.crop((left, top, right, bottom))
 
 
 def _font(path: Path | None, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:

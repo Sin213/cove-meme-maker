@@ -583,6 +583,101 @@ def main() -> None:
             f"/render top_rotation=Infinity: expected 400, got {s_rotinf}"
         print(f"  /render top_rotation=Infinity → 400 OK")
 
+        # ── crop checks ──────────────────────────────────────────────────────
+
+        # valid crop → 200 PNG
+        valid_crop = {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8}
+        status_crop_ok, data_crop_ok = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "style": "classic",
+            "top": "HELLO",
+            "crop": valid_crop,
+        })
+        assert status_crop_ok == 200, \
+            f"/render valid crop: expected 200, got {status_crop_ok}"
+        assert "preview_b64" in data_crop_ok, \
+            f"/render valid crop: missing preview_b64"
+        assert base64.b64decode(data_crop_ok["preview_b64"])[:4] == b"\x89PNG", \
+            f"/render valid crop: response is not PNG"
+        print(f"  /render valid crop → 200 PNG OK")
+
+        # absent crop → 200 (crop is optional)
+        status_crop_absent, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "style": "classic",
+            "top": "HELLO",
+        })
+        assert status_crop_absent == 200, \
+            f"/render absent crop: expected 200, got {status_crop_absent}"
+        print(f"  /render absent crop → 200 OK")
+
+        # null crop → 200 (same as absent)
+        status_crop_null, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "style": "classic",
+            "top": "HELLO",
+            "crop": None,
+        })
+        assert status_crop_null == 200, \
+            f"/render null crop: expected 200, got {status_crop_null}"
+        print(f"  /render null crop → 200 OK")
+
+        # crop = array (not object) → 400
+        s_crop_arr, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "crop": [0.1, 0.1, 0.8, 0.8],
+        })
+        assert s_crop_arr == 400, \
+            f"/render crop=array: expected 400, got {s_crop_arr}"
+        print(f"  /render crop=[...] (array) → 400 OK")
+
+        # crop = string → 400
+        s_crop_str, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "crop": "center",
+        })
+        assert s_crop_str == 400, \
+            f"/render crop='center' (string): expected 400, got {s_crop_str}"
+        print(f"  /render crop='center' (string) → 400 OK")
+
+        # crop missing a required field → 400
+        s_crop_missing, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "crop": {"x": 0.1, "y": 0.1, "width": 0.8},  # missing height
+        })
+        assert s_crop_missing == 400, \
+            f"/render crop missing height: expected 400, got {s_crop_missing}"
+        print(f"  /render crop missing field → 400 OK")
+
+        # crop with string field value → 400
+        s_crop_strval, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "crop": {"x": "left", "y": 0.1, "width": 0.8, "height": 0.8},
+        })
+        assert s_crop_strval == 400, \
+            f"/render crop field='left' (string): expected 400, got {s_crop_strval}"
+        print(f"  /render crop field string value → 400 OK")
+
+        # out-of-range crop → 200 (server clamps to [0,1])
+        status_crop_oor, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "style": "classic",
+            "top": "HELLO",
+            "crop": {"x": -0.5, "y": -0.5, "width": 2.0, "height": 2.0},
+        })
+        assert status_crop_oor == 200, \
+            f"/render out-of-range crop: expected 200 (clamped), got {status_crop_oor}"
+        print(f"  /render out-of-range crop → 200 (clamped) OK")
+
+        # zero-area crop (width < MIN_DIM after clamping) → 400
+        s_crop_zero, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "crop": {"x": 0.5, "y": 0.5, "width": 0.001, "height": 0.8},
+        })
+        assert s_crop_zero == 400, \
+            f"/render zero-area crop: expected 400, got {s_crop_zero}"
+        print(f"  /render zero-area crop → 400 OK")
+
         # --- clean shutdown on socket close ---
         f.close()   # close file-object first to release the dup'd fd
         conn.close()
