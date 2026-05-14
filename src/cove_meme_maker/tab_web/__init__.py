@@ -136,8 +136,8 @@ html,body{height:100%;overflow:hidden;font-family:"Geist",Inter,ui-sans-serif,sy
 /* Canvas pane */
 #canvas-pane{display:flex;flex-direction:column;flex:1;overflow:hidden;border-right:1px solid rgba(255,255,255,0.06)}
 #canvas-header{display:flex;align-items:center;gap:8px;padding:0 16px;height:36px;background:#0a0a0e;border-bottom:1px solid rgba(255,255,255,0.06);flex-shrink:0}
-#header-title{font-size:12.5px;font-weight:500;color:#9a9aae;flex:1}
-#header-session{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:10px;color:#6b6b80}
+#header-title{font-size:12.5px;font-weight:600;color:#ececf1;letter-spacing:0.02em;flex:1}
+#header-brand{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:10px;color:#6b6b80;letter-spacing:0.08em;text-transform:uppercase}
 #canvas-toolbar{display:flex;align-items:center;gap:8px;padding:0 12px;height:36px;background:rgba(255,255,255,0.01);border-bottom:1px solid rgba(255,255,255,0.06);flex-shrink:0}
 #file-name{font-size:12.5px;font-weight:500;color:#ececf1;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #file-meta{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:10.5px;color:#6b6b80;white-space:nowrap}
@@ -157,7 +157,7 @@ html,body{height:100%;overflow:hidden;font-family:"Geist",Inter,ui-sans-serif,sy
 #choose-btn{margin-top:12px;background:transparent;color:#9a9aae;border:1px solid rgba(255,255,255,0.10);border-radius:8px;padding:8px 18px;font-size:12.5px;cursor:pointer;font-family:inherit}
 #choose-btn:hover{color:#ececf1;background:#161620}
 #preview-wrap{display:none;width:100%;height:100%;align-items:center;justify-content:center;padding:16px;position:relative}
-#preview-img{max-width:100%;max-height:100%;object-fit:contain;border-radius:4px}
+#preview-img{max-width:100%;max-height:100%;object-fit:contain;border-radius:4px;box-shadow:0 8px 32px rgba(0,0,0,0.55),0 0 0 1px rgba(255,255,255,0.04)}
 #handle-layer{position:absolute;inset:0;pointer-events:none}
 .drag-handle{position:absolute;width:28px;height:28px;border-radius:50%;background:rgba(80,230,207,0.85);color:#0a0a0e;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;cursor:grab;transform:translate(-50%,-50%);pointer-events:all;user-select:none;border:2px solid rgba(255,255,255,0.6)}
 .drag-handle:active{cursor:grabbing;background:rgba(80,230,207,1)}
@@ -220,9 +220,6 @@ input[type="range"].slider::-webkit-slider-thumb{-webkit-appearance:none;width:1
 input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid #0a0a0e;cursor:pointer}
 .slider-val{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:12px;color:#9a9aae;width:36px;text-align:right;flex-shrink:0}
 
-.font-row{display:flex;align-items:center;gap:8px;padding:0 12px 12px}
-.font-display{flex:1;background:#11111a;color:#9a9aae;border:1px solid rgba(255,255,255,0.06);border-radius:7px;padding:7px 10px;font-size:12.5px}
-.font-add-btn{background:transparent;color:#6b6b80;border:1px solid rgba(255,255,255,0.06);border-radius:7px;padding:7px 12px;font-size:12px;cursor:default;opacity:0.5;font-family:inherit}
 
 .font-select-row{display:flex;align-items:center;gap:8px;padding:0 16px 12px}
 .font-select-lbl{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:12px;color:#9a9aae;width:52px;flex-shrink:0}
@@ -256,8 +253,9 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
 
   <div id="canvas-pane">
     <div id="canvas-header">
-      <span id="header-title">Cove Meme Maker</span>
-      <span id="header-session">Session&#x2009;<code id="session-id" data-run-id="__RUN_ID_ATTR__"></code></span>
+      <span id="header-title">Meme Maker</span>
+      <span id="header-brand">Cove</span>
+      <span id="header-runid" hidden data-run-id="__RUN_ID_ATTR__"></span>
     </div>
     <div id="canvas-toolbar">
       <span id="file-name">No file</span>
@@ -378,21 +376,16 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       <div id="modern-section" style="display:none">
         <span class="field-label">Caption</span>
         <div class="field-row">
+          <textarea class="field-ta caption" id="caption-text" placeholder="Caption"></textarea>
           <label class="color-btn" title="Caption colour">
             <span class="color-swatch" id="caption-swatch"></span>
             <input type="color" id="caption-color" value="#000000">
           </label>
-          <textarea class="field-ta caption" id="caption-text" placeholder="Caption"></textarea>
         </div>
       </div>
 
       <div class="sec-divider"></div>
       <span class="sec-label">Typography</span>
-
-      <div class="font-row">
-        <div class="font-display">Impact</div>
-        <button class="font-add-btn" disabled>+ Font</button>
-      </div>
 
       <div class="slider-row">
         <span class="slider-lbl">Size</span>
@@ -443,9 +436,6 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
 <script>
 (function () {
   'use strict';
-
-  var sessionEl = document.getElementById('session-id');
-  sessionEl.textContent = sessionEl.dataset.runId || '';
 
   var fileInput   = document.getElementById('file-input');
   var fileNameEl  = document.getElementById('file-name');
@@ -522,6 +512,8 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   var cropRect   = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
   var cropDragging = null; // null | 'tl'|'tr'|'bl'|'br'
   var srcNaturalAspect = null; // naturalWidth/naturalHeight of source image
+  var srcNaturalWidth  = null; // source image natural width in pixels (for readouts)
+  var srcNaturalHeight = null; // source image natural height in pixels (for readouts)
   var subDragging  = null; // null | {which:'top'|'bottom', type:'resize'|'rotate', startX, startVal}
 
   function setStatus(msg, pulse) {
@@ -617,10 +609,17 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     cropShadeR.style.cssText = 'top:' + by + 'px;left:' + (bx + bw) + 'px;right:' + (wrapRect.width - ox - iw) + 'px;height:' + bh + 'px';
     // box
     cropBox.style.cssText = 'left:' + bx + 'px;top:' + by + 'px;width:' + bw + 'px;height:' + bh + 'px';
-    // readout
-    cropReadoutTx.textContent =
-      'x:' + cropRect.x.toFixed(2) + ' y:' + cropRect.y.toFixed(2) +
-      ' w:' + cropRect.width.toFixed(2) + ' h:' + cropRect.height.toFixed(2);
+    // readout — prefer friendly pixel dimensions when we know the source size
+    if (srcNaturalWidth && srcNaturalHeight) {
+      var pxW = Math.max(1, Math.round(cropRect.width  * srcNaturalWidth));
+      var pxH = Math.max(1, Math.round(cropRect.height * srcNaturalHeight));
+      var pct = Math.round(cropRect.width * cropRect.height * 100);
+      cropReadoutTx.textContent = pxW + ' × ' + pxH + ' px · ' + pct + '% of source';
+    } else {
+      cropReadoutTx.textContent =
+        Math.round(cropRect.width * 100) + '% × ' +
+        Math.round(cropRect.height * 100) + '% of source';
+    }
   }
 
   function _applyAspectConstraint(r, corner) {
@@ -870,6 +869,8 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
           img.onload = function () {
             if (myToken !== renderToken) return;
             fileMetaEl.textContent = img.naturalWidth + ' \xd7 ' + img.naturalHeight;
+            srcNaturalWidth  = img.naturalWidth || null;
+            srcNaturalHeight = img.naturalHeight || null;
             srcNaturalAspect = img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : null;
             renderBtn.disabled = false;
             clearBtn.disabled  = false;
@@ -1038,6 +1039,8 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
         fileMetaEl.textContent =
           img.naturalWidth + ' × ' + img.naturalHeight +
           ' · ' + (file.size / 1024).toFixed(0) + ' KB';
+        srcNaturalWidth  = img.naturalWidth || null;
+        srcNaturalHeight = img.naturalHeight || null;
         srcNaturalAspect = img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : null;
         renderBtn.disabled = false;
         clearBtn.disabled  = false;
