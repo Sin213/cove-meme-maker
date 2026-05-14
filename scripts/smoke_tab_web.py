@@ -731,6 +731,28 @@ def main() -> None:
             f"/render bottom_font=['mono'] (list): expected 400, got {s_badbotfont}"
         print(f"  /render bottom_font=['mono'] (non-string) → 400 OK")
 
+        # crop + font combo → 200 PNG
+        s_crop_font, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "top": "hello",
+            "top_font": "sans",
+            "crop": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
+        })
+        assert s_crop_font == 200, \
+            f"/render crop+font: expected 200, got {s_crop_font}"
+        print(f"  /render crop+top_font='sans' → 200 OK")
+
+        # crop + non-string font → 400
+        s_crop_badfont, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "top": "hello",
+            "top_font": 99,
+            "crop": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
+        })
+        assert s_crop_badfont == 400, \
+            f"/render crop+non-string font: expected 400, got {s_crop_badfont}"
+        print(f"  /render crop+top_font=99 (non-string) → 400 OK")
+
         # --- clean shutdown on socket close ---
         f.close()   # close file-object first to release the dup'd fd
         conn.close()

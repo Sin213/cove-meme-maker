@@ -419,6 +419,17 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       <div id="crop-readout" style="display:none;padding:0 16px 12px">
         <span style="font-family:monospace;font-size:11px;color:#6b6b80" id="crop-readout-text"></span>
       </div>
+      <div class="font-select-row">
+        <span class="font-select-lbl">Aspect</span>
+        <select class="font-select" id="aspect-sel">
+          <option value="free">Free</option>
+          <option value="1:1">1 : 1</option>
+          <option value="4:3">4 : 3</option>
+          <option value="16:9">16 : 9</option>
+          <option value="9:16">9 : 16</option>
+          <option value="original">Original</option>
+        </select>
+      </div>
 
     </div>
 
@@ -491,6 +502,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   var cropResetBtn  = document.getElementById('crop-reset-btn');
   var cropReadout   = document.getElementById('crop-readout');
   var cropReadoutTx = document.getElementById('crop-readout-text');
+  var aspectSel     = document.getElementById('aspect-sel');
   var cropOverlay   = document.getElementById('crop-overlay');
   var cropBox       = document.getElementById('crop-box');
   var cropShadeT    = document.getElementById('crop-shade-t');
@@ -509,6 +521,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   var cropActive = false;
   var cropRect   = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
   var cropDragging = null; // null | 'tl'|'tr'|'bl'|'br'
+  var srcNaturalAspect = null; // naturalWidth/naturalHeight of source image
   var subDragging  = null; // null | {which:'top'|'bottom', type:'resize'|'rotate', startX, startVal}
 
   function setStatus(msg, pulse) {
@@ -610,6 +623,45 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       ' w:' + cropRect.width.toFixed(2) + ' h:' + cropRect.height.toFixed(2);
   }
 
+  function _applyAspectConstraint(r, corner) {
+    var val = aspectSel.value;
+    if (val === 'free') return;
+    // srcNaturalAspect is needed for all options to convert between
+    // normalized crop coords and pixel aspect: pixel_ar = (r.width/r.height)*srcNaturalAspect
+    if (!srcNaturalAspect) return;
+    var ar;
+    if (val === '1:1')       { ar = 1; }
+    else if (val === '4:3')  { ar = 4 / 3; }
+    else if (val === '16:9') { ar = 16 / 9; }
+    else if (val === '9:16') { ar = 9 / 16; }
+    else if (val === 'original') { ar = srcNaturalAspect; }
+    else { return; }
+    // Solve for r.height: (r.width/r.height)*srcNaturalAspect = ar
+    //   => r.height = r.width * srcNaturalAspect / ar
+    var targetH = Math.max(0.01, r.width * srcNaturalAspect / ar);
+    if (corner === 'tl' || corner === 'tr') {
+      // Keep bottom edge fixed; move top edge up.
+      var bottom = r.y + r.height;
+      var newY = Math.max(0, bottom - targetH);
+      r.height = bottom - newY;
+      r.y = newY;
+      // If top boundary clamped height short, shrink width to preserve aspect.
+      if (r.height < targetH - 1e-9) {
+        r.width = Math.max(0.01, Math.min(r.height * ar / srcNaturalAspect, 1.0 - r.x));
+      }
+    } else {
+      // Keep top/left fixed; extend downward.
+      var maxH = 1.0 - r.y;
+      if (targetH <= maxH) {
+        r.height = targetH;
+      } else {
+        // Bottom boundary hit — shrink width so aspect stays valid.
+        r.height = maxH;
+        r.width = Math.max(0.01, Math.min(r.height * ar / srcNaturalAspect, 1.0 - r.x));
+      }
+    }
+  }
+
   cropToggleBtn.addEventListener('click', function () {
     if (!currentDataUrl || cropToggleBtn.disabled) return;
     cropActive = !cropActive;
@@ -624,8 +676,9 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       // the source first and let layout settle before computing the overlay.
       if (previewImg.src !== currentDataUrl) {
         previewImg.src = currentDataUrl;
-        requestAnimationFrame(function () { if (cropActive) _updateCropOverlay(); });
+        requestAnimationFrame(function () { if (cropActive) { _applyAspectConstraint(cropRect, 'br'); _updateCropOverlay(); } });
       } else {
+        _applyAspectConstraint(cropRect, 'br');
         _updateCropOverlay();
       }
     } else {
@@ -639,7 +692,12 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
 
   cropResetBtn.addEventListener('click', function () {
     cropRect = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
+    _applyAspectConstraint(cropRect, 'br');
     _updateCropOverlay();
+  });
+
+  aspectSel.addEventListener('change', function () {
+    if (cropActive) { _applyAspectConstraint(cropRect, 'br'); _updateCropOverlay(); }
   });
 
   (function () {
@@ -682,6 +740,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
         r.width  = Math.max(MIN_DIM, nx - r.x);
         r.height = Math.max(MIN_DIM, ny - r.y);
       }
+      _applyAspectConstraint(r, cropDragging);
       _updateCropOverlay();
     }
     window.addEventListener('mousemove', function (e) { if (cropDragging) _onCropMove(e.clientX, e.clientY); });
@@ -811,6 +870,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
           img.onload = function () {
             if (myToken !== renderToken) return;
             fileMetaEl.textContent = img.naturalWidth + ' \xd7 ' + img.naturalHeight;
+            srcNaturalAspect = img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : null;
             renderBtn.disabled = false;
             clearBtn.disabled  = false;
             dropZone.style.display    = 'none';
@@ -978,6 +1038,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
         fileMetaEl.textContent =
           img.naturalWidth + ' × ' + img.naturalHeight +
           ' · ' + (file.size / 1024).toFixed(0) + ' KB';
+        srcNaturalAspect = img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : null;
         renderBtn.disabled = false;
         clearBtn.disabled  = false;
         dropZone.style.display    = 'none';
