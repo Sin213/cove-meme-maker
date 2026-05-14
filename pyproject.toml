@@ -22,4 +22,4 @@ cove-meme-maker = "cove_meme_maker.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-cove_meme_maker = ["assets/*.png", "assets/*.ico"]
+cove_meme_maker = ["assets/*.png", "assets/*.ico", "templates/*.png", "templates/README.md"]

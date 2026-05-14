@@ -16,6 +16,7 @@ import html
 import io
 import json
 import math
+import pathlib
 import re
 import signal
 import socket
@@ -46,6 +47,47 @@ def _send_msg(sock: socket.socket, **fields) -> None:
 _MAX_REQUEST_BODY = 20 * 1024 * 1024   # 20 MB — JSON body including base64 image
 _MAX_IMAGE_BYTES  = 10 * 1024 * 1024   # 10 MB — decoded image bytes
 _MAX_IMAGE_PIXELS = 4096 * 4096        # 16 MP — source image width × height
+
+# ---------------------------------------------------------------------------
+# Template registry
+# ---------------------------------------------------------------------------
+
+_TEMPLATES_DIR = (pathlib.Path(__file__).parent.parent / "templates").resolve()
+
+_TEMPLATE_CONTENT_TYPES: dict[str, str] = {
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+
+# Slug validation: lowercase alphanumeric + hyphens, 1–64 chars, must start with [a-z0-9].
+_SLUG_RE = re.compile(r'^[a-z0-9][a-z0-9-]{0,63}$')
+
+
+def _slugify(stem: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '-', stem.lower()).strip('-')
+
+
+def _build_template_registry() -> dict[str, pathlib.Path]:
+    """Scan _TEMPLATES_DIR and return {slug: resolved_path}.
+
+    Built once at import time; result is read-only after startup.
+    Unknown/missing dir yields an empty registry rather than erroring.
+    """
+    registry: dict[str, pathlib.Path] = {}
+    if not _TEMPLATES_DIR.is_dir():
+        return registry
+    for p in sorted(_TEMPLATES_DIR.iterdir()):
+        if p.suffix.lower() not in _TEMPLATE_CONTENT_TYPES:
+            continue
+        slug = _slugify(p.stem)
+        if slug and slug not in registry:
+            registry[slug] = p.resolve()
+    return registry
+
+
+_TEMPLATE_REGISTRY: dict[str, pathlib.Path] = _build_template_registry()
 
 # Minimal HTML page
 # ---------------------------------------------------------------------------
@@ -140,6 +182,18 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
 #copy-btn{width:100%;padding:10px 18px;background:#11111a;color:#9a9aae;border:1px solid rgba(255,255,255,0.06);border-radius:9px;font-size:13px;cursor:pointer;font-family:inherit}
 #copy-btn:hover:not(:disabled){color:#ececf1;background:#161620;border-color:rgba(255,255,255,0.10)}
 #copy-btn:disabled{color:#6b6b80;cursor:default}
+
+/* Template gallery */
+#gallery-strip{display:flex;gap:8px;overflow-x:auto;padding:0 12px 12px;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,0.08) transparent}
+#gallery-strip::-webkit-scrollbar{height:4px}
+#gallery-strip::-webkit-scrollbar-track{background:transparent}
+#gallery-strip::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:2px}
+.tmpl-card{flex-shrink:0;width:72px;cursor:pointer;border-radius:7px;border:2px solid transparent;overflow:hidden;background:#11111a;transition:border-color 0.12s}
+.tmpl-card:hover{border-color:rgba(255,255,255,0.16)}
+.tmpl-card.selected{border-color:#50e6cf}
+.tmpl-card img{display:block;width:72px;height:48px;object-fit:cover}
+.tmpl-name{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:10px;color:#9a9aae;text-align:center;padding:4px 4px 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#gallery-empty{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:11px;color:#6b6b80;padding:0 16px 12px}
 </style>
 </head>
 <body>
@@ -176,6 +230,10 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   <div id="inspector">
     <div id="inspector-body">
 
+      <span class="sec-label">Templates</span>
+      <div id="gallery-strip"></div>
+
+      <div class="sec-divider"></div>
       <span class="sec-label">Style</span>
       <div id="seg-frame">
         <button class="seg-btn active" id="btn-classic">Classic</button>
@@ -288,8 +346,9 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   var sizeVal     = document.getElementById('size-val');
   var strokeVal   = document.getElementById('stroke-val');
   var padVal      = document.getElementById('pad-val');
-  var exportBtn   = document.getElementById('export-btn');
-  var copyBtn     = document.getElementById('copy-btn');
+  var exportBtn    = document.getElementById('export-btn');
+  var copyBtn      = document.getElementById('copy-btn');
+  var galleryStrip = document.getElementById('gallery-strip');
 
   var styleMode    = 'classic';
   var currentDataUrl = null;
@@ -299,6 +358,110 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   function setStatus(msg, pulse) {
     statusMsg.textContent = msg;
     statusPulse.style.background = pulse || '#3ddc97';
+  }
+
+  function _deselectTemplates() {
+    var cards = galleryStrip.querySelectorAll('.tmpl-card.selected');
+    for (var i = 0; i < cards.length; i++) { cards[i].classList.remove('selected'); }
+  }
+
+  function loadTemplate(id, name) {
+    var myToken = ++renderToken;
+    currentDataUrl = null;
+    lastPng = null;
+    renderBtn.disabled = true;
+    exportBtn.disabled = true;
+    copyBtn.disabled   = true;
+    fileNameEl.textContent = name;
+    fileMetaEl.textContent = '';
+    setStatus('Loading template…', '#ffb454');
+
+    fetch('/templates/' + encodeURIComponent(id))
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.blob();
+      })
+      .then(function (blob) {
+        if (myToken !== renderToken) return;
+        var reader = new FileReader();
+        reader.onload = function (e) {
+          if (myToken !== renderToken) return;
+          currentDataUrl = e.target.result;
+          var img = new Image();
+          img.onload = function () {
+            if (myToken !== renderToken) return;
+            fileMetaEl.textContent = img.naturalWidth + ' \xd7 ' + img.naturalHeight;
+            renderBtn.disabled = false;
+            clearBtn.disabled  = false;
+            dropZone.style.display    = 'none';
+            previewWrap.style.display = 'flex';
+            previewImg.src = currentDataUrl;
+            setStatus('Template loaded — press Render');
+          };
+          img.onerror = function () {
+            if (myToken !== renderToken) return;
+            currentDataUrl = null;
+            fileMetaEl.textContent = '';
+            previewWrap.style.display = 'none';
+            previewImg.src = '';
+            dropZone.style.display = '';
+            _deselectTemplates();
+            setStatus('Template image failed to load', '#ff6b6b');
+          };
+          img.src = e.target.result;
+        };
+        reader.onerror = function () {
+          if (myToken !== renderToken) return;
+          currentDataUrl = null;
+          fileMetaEl.textContent = '';
+          previewWrap.style.display = 'none';
+          previewImg.src = '';
+          dropZone.style.display = '';
+          _deselectTemplates();
+          setStatus('Template read failed', '#ff6b6b');
+        };
+        reader.readAsDataURL(blob);
+      })
+      .catch(function (err) {
+        if (myToken !== renderToken) return;
+        _deselectTemplates();
+        setStatus('Template error: ' + err.message, '#ff6b6b');
+      });
+  }
+
+  function buildGallery(templates) {
+    if (!templates || !templates.length) {
+      var empty = document.createElement('div');
+      empty.id = 'gallery-empty';
+      empty.textContent = 'Drop images into the templates folder to add templates.';
+      galleryStrip.replaceWith(empty);
+      return;
+    }
+    for (var i = 0; i < templates.length; i++) {
+      (function (t) {
+        var card = document.createElement('div');
+        card.className = 'tmpl-card';
+
+        var img = document.createElement('img');
+        img.src = '/templates/' + encodeURIComponent(t.id);
+        img.alt = '';
+        img.loading = 'lazy';
+
+        var nameEl = document.createElement('div');
+        nameEl.className = 'tmpl-name';
+        nameEl.textContent = t.name;
+
+        card.appendChild(img);
+        card.appendChild(nameEl);
+        card.addEventListener('click', function () {
+          _deselectTemplates();
+          card.classList.add('selected');
+          fileInput.value = '';
+          loadTemplate(t.id, t.name);
+        });
+        galleryStrip.appendChild(card);
+      })(templates[i]);
+    }
   }
 
   function fillSlider(sl) {
@@ -338,6 +501,7 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
 
   function loadFile(file) {
     if (!file) return;
+    _deselectTemplates();
     var myLoadToken = ++renderToken;
     currentDataUrl = null;
     lastPng = null;
@@ -392,6 +556,7 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
 
   clearBtn.addEventListener('click', function () {
     renderToken++;
+    _deselectTemplates();
     currentDataUrl = null;
     lastPng = null;
     fileInput.value = '';
@@ -500,6 +665,11 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
       .catch(function (e) { setStatus('Copy failed: ' + e.message, '#ff6b6b'); });
   });
 
+  fetch('/templates')
+    .then(function (r) { return r.json(); })
+    .then(function (data) { buildGallery(data.templates || []); })
+    .catch(function () { /* gallery stays empty on network error — not critical */ });
+
 }());
 </script>
 </body>
@@ -551,6 +721,10 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path in ("/", "/index.html"):
             self._serve_html()
+        elif self.path == "/templates":
+            self._serve_template_list()
+        elif self.path.startswith("/templates/"):
+            self._serve_template_image(self.path[len("/templates/"):])
         else:
             self._reply(404, "text/plain", b"Not found")
 
@@ -583,6 +757,39 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
+
+    def _serve_template_list(self) -> None:
+        items = [
+            {"id": slug, "name": slug.replace("-", " ").title(),
+             "url": f"/templates/{slug}"}
+            for slug in _TEMPLATE_REGISTRY
+        ]
+        body = json.dumps({"templates": items}).encode("utf-8")
+        self._reply(200, "application/json", body)
+
+    def _serve_template_image(self, slug: str) -> None:
+        if not _SLUG_RE.match(slug):
+            self._json_error(404, "not found")
+            return
+        p = _TEMPLATE_REGISTRY.get(slug)
+        if p is None:
+            self._json_error(404, "not found")
+            return
+        # Defense-in-depth: confirm path is inside _TEMPLATES_DIR.
+        # The registry only contains resolved paths built at startup, so this
+        # guard is a belt-and-suspenders check rather than the primary defense.
+        try:
+            p.relative_to(_TEMPLATES_DIR)
+        except ValueError:
+            self._json_error(404, "not found")
+            return
+        try:
+            data = p.read_bytes()
+        except OSError:
+            self._json_error(500, "template unavailable")
+            return
+        ctype = _TEMPLATE_CONTENT_TYPES.get(p.suffix.lower(), "application/octet-stream")
+        self._reply(200, ctype, data)
 
     def _json_error(self, code: int, msg: str) -> None:
         self._reply(code, "application/json",

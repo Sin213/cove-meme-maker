@@ -60,6 +60,7 @@ $commonArgs = @(
     '--icon', 'cove_icon.ico',
     '--paths', 'src',
     '--add-data', ("src\cove_meme_maker\assets\cove_icon.png" + [IO.Path]::PathSeparator + "cove_meme_maker\assets"),
+    '--add-data', ("src\cove_meme_maker\templates" + [IO.Path]::PathSeparator + "cove_meme_maker\templates"),
     '--exclude-module', 'PySide6.QtWebEngineCore',
     '--exclude-module', 'PySide6.QtWebEngineWidgets',
     '--exclude-module', 'PySide6.QtQml',
@@ -92,6 +93,7 @@ $portableName = "$App-portable"
     --icon cove_icon.ico `
     --paths src `
     --add-data ("src\cove_meme_maker\assets\cove_icon.png" + [IO.Path]::PathSeparator + "cove_meme_maker\assets") `
+    --add-data ("src\cove_meme_maker\templates" + [IO.Path]::PathSeparator + "cove_meme_maker\templates") `
     --exclude-module PySide6.QtWebEngineCore `
     --exclude-module PySide6.QtWebEngineWidgets `
     --exclude-module PySide6.QtQml `

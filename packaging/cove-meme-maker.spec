@@ -6,6 +6,7 @@ block_cipher = None
 PROJECT_ROOT = Path(SPECPATH).parent
 SRC = PROJECT_ROOT / "src"
 ASSETS = SRC / "cove_meme_maker" / "assets"
+TEMPLATES = SRC / "cove_meme_maker" / "templates"
 
 a = Analysis(
     [str(PROJECT_ROOT / "packaging" / "launcher.py")],
@@ -13,6 +14,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(ASSETS / "cove_icon.png"), "cove_meme_maker/assets"),
+        (str(TEMPLATES), "cove_meme_maker/templates"),
     ],
     hiddenimports=["cove_meme_maker.tab_web"],
     hookspath=[],
