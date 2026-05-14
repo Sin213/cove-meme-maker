@@ -129,8 +129,12 @@ html,body{height:100%;overflow:hidden;font-family:"Geist",Inter,ui-sans-serif,sy
 #dz-sub{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:11px;color:#6b6b80;letter-spacing:0.04em}
 #choose-btn{margin-top:12px;background:transparent;color:#9a9aae;border:1px solid rgba(255,255,255,0.10);border-radius:8px;padding:8px 18px;font-size:12.5px;cursor:pointer;font-family:inherit}
 #choose-btn:hover{color:#ececf1;background:#161620}
-#preview-wrap{display:none;width:100%;height:100%;align-items:center;justify-content:center;padding:16px}
+#preview-wrap{display:none;width:100%;height:100%;align-items:center;justify-content:center;padding:16px;position:relative}
 #preview-img{max-width:100%;max-height:100%;object-fit:contain;border-radius:4px}
+#handle-layer{position:absolute;inset:0;pointer-events:none}
+.drag-handle{position:absolute;width:28px;height:28px;border-radius:50%;background:rgba(80,230,207,0.85);color:#0a0a0e;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;cursor:grab;transform:translate(-50%,-50%);pointer-events:all;user-select:none;border:2px solid rgba(255,255,255,0.6)}
+.drag-handle:active{cursor:grabbing;background:rgba(80,230,207,1)}
+.drag-handle.hidden{display:none}
 
 #canvas-statusbar{display:flex;align-items:center;gap:8px;padding:0 12px;height:28px;background:rgba(255,255,255,0.012);border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0}
 #status-pulse{width:6px;height:6px;border-radius:3px;background:#3ddc97;flex-shrink:0;transition:background 0.2s}
@@ -219,6 +223,10 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
       </div>
       <div id="preview-wrap">
         <img id="preview-img" alt="">
+        <div id="handle-layer">
+          <div id="top-handle" class="drag-handle hidden">T</div>
+          <div id="bottom-handle" class="drag-handle hidden">B</div>
+        </div>
       </div>
     </div>
     <div id="canvas-statusbar">
@@ -349,16 +357,77 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   var exportBtn    = document.getElementById('export-btn');
   var copyBtn      = document.getElementById('copy-btn');
   var galleryStrip = document.getElementById('gallery-strip');
+  var topHandle    = document.getElementById('top-handle');
+  var bottomHandle = document.getElementById('bottom-handle');
 
   var styleMode    = 'classic';
   var currentDataUrl = null;
   var lastPng      = null;
   var renderToken  = 0;
+  var topPos    = null;
+  var bottomPos = null;
+  var dragging  = null;
 
   function setStatus(msg, pulse) {
     statusMsg.textContent = msg;
     statusPulse.style.background = pulse || '#3ddc97';
   }
+
+  function _placeHandle(handle, nx, ny) {
+    var imgRect  = previewImg.getBoundingClientRect();
+    var wrapRect = previewWrap.getBoundingClientRect();
+    handle.style.left = (imgRect.left - wrapRect.left + nx * imgRect.width)  + 'px';
+    handle.style.top  = (imgRect.top  - wrapRect.top  + ny * imgRect.height) + 'px';
+  }
+
+  function _showHandles() {
+    _placeHandle(topHandle,    topPos    ? topPos[0]    : 0.5, topPos    ? topPos[1]    : 0.10);
+    _placeHandle(bottomHandle, bottomPos ? bottomPos[0] : 0.5, bottomPos ? bottomPos[1] : 0.90);
+    topHandle.classList.remove('hidden');
+    bottomHandle.classList.remove('hidden');
+  }
+
+  function _hideHandles() {
+    topHandle.classList.add('hidden');
+    bottomHandle.classList.add('hidden');
+  }
+
+  function _resetHandles() {
+    topPos    = null;
+    bottomPos = null;
+    _hideHandles();
+  }
+
+  function _onDragMove(clientX, clientY) {
+    if (!dragging) return;
+    var imgRect = previewImg.getBoundingClientRect();
+    var nx = Math.max(0, Math.min(1, (clientX - imgRect.left) / imgRect.width));
+    var ny = Math.max(0, Math.min(1, (clientY - imgRect.top)  / imgRect.height));
+    if (dragging === 'top') {
+      topPos = [nx, ny];
+      _placeHandle(topHandle, nx, ny);
+    } else {
+      bottomPos = [nx, ny];
+      _placeHandle(bottomHandle, nx, ny);
+    }
+  }
+
+  topHandle.addEventListener('mousedown', function (e) { e.preventDefault(); dragging = 'top'; });
+  bottomHandle.addEventListener('mousedown', function (e) { e.preventDefault(); dragging = 'bottom'; });
+  window.addEventListener('mousemove', function (e) { if (dragging) _onDragMove(e.clientX, e.clientY); });
+  window.addEventListener('mouseup', function () { dragging = null; });
+
+  topHandle.addEventListener('touchstart', function (e) { e.preventDefault(); dragging = 'top'; }, { passive: false });
+  bottomHandle.addEventListener('touchstart', function (e) { e.preventDefault(); dragging = 'bottom'; }, { passive: false });
+  window.addEventListener('touchmove', function (e) {
+    if (dragging) { e.preventDefault(); var t = e.touches[0]; _onDragMove(t.clientX, t.clientY); }
+  }, { passive: false });
+  window.addEventListener('touchend', function () { dragging = null; });
+
+  window.addEventListener('resize', function () {
+    if (!topHandle.classList.contains('hidden'))    _placeHandle(topHandle,    topPos    ? topPos[0]    : 0.5, topPos    ? topPos[1]    : 0.10);
+    if (!bottomHandle.classList.contains('hidden')) _placeHandle(bottomHandle, bottomPos ? bottomPos[0] : 0.5, bottomPos ? bottomPos[1] : 0.90);
+  });
 
   function _deselectTemplates() {
     var cards = galleryStrip.querySelectorAll('.tmpl-card.selected');
@@ -397,6 +466,11 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
             previewWrap.style.display = 'flex';
             previewImg.src = currentDataUrl;
             setStatus('Template loaded — press Render');
+            _resetHandles();
+            if (styleMode === 'classic') {
+              var tok = myToken;
+              requestAnimationFrame(function () { if (tok === renderToken) _showHandles(); });
+            }
           };
           img.onerror = function () {
             if (myToken !== renderToken) return;
@@ -495,6 +569,21 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
     btnModern.classList.toggle('active', mode === 'modern');
     classicSec.style.display = mode === 'classic' ? '' : 'none';
     modernSec.style.display  = mode === 'modern'  ? '' : 'none';
+    if (currentDataUrl) {
+      if (mode === 'classic') {
+        if (previewImg.src !== currentDataUrl) {
+          lastPng = null;
+          exportBtn.disabled = true;
+          copyBtn.disabled   = true;
+          previewImg.src = currentDataUrl;
+          requestAnimationFrame(function () { if (styleMode === 'classic') _showHandles(); });
+        } else {
+          _showHandles();
+        }
+      } else {
+        _hideHandles();
+      }
+    }
   }
   btnClassic.addEventListener('click', function () { setStyle('classic'); });
   btnModern.addEventListener('click', function () { setStyle('modern'); });
@@ -525,6 +614,11 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
         previewWrap.style.display = 'flex';
         previewImg.src = currentDataUrl;
         setStatus('Image loaded — press Render');
+        _resetHandles();
+        if (styleMode === 'classic') {
+          var tok = myLoadToken;
+          requestAnimationFrame(function () { if (tok === renderToken) _showHandles(); });
+        }
       };
       img.onerror = function () {
         if (myLoadToken !== renderToken) return;
@@ -557,6 +651,7 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   clearBtn.addEventListener('click', function () {
     renderToken++;
     _deselectTemplates();
+    _resetHandles();
     currentDataUrl = null;
     lastPng = null;
     fileInput.value = '';
@@ -612,6 +707,8 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
         font_scale:    parseInt(sizeSl.value, 10),
         stroke_ratio:  parseInt(strokeSl.value, 10),
         padding_scale: parseInt(padSl.value, 10),
+        top_pos:       topPos,
+        bottom_pos:    bottomPos,
       }),
     })
     .then(function (r) {
@@ -700,6 +797,24 @@ def _safe_pct(val: object, spec_default: float) -> float:
         return v / 100.0
     except (TypeError, ValueError):
         return spec_default
+
+
+def _parse_pos(val: object) -> "tuple[float, float] | None":
+    """Parse a normalized [x, y] position from the client.
+    Returns None if absent. Raises ValueError for present-but-malformed input.
+    Returns (cx, cy) clamped to [0.0, 1.0] for valid input."""
+    if val is None:
+        return None
+    if not isinstance(val, (list, tuple)) or len(val) != 2:
+        raise ValueError("pos must be a two-element array")
+    try:
+        x = float(val[0])
+        y = float(val[1])
+    except (TypeError, ValueError):
+        raise ValueError("pos values must be numbers")
+    if not (math.isfinite(x) and math.isfinite(y)):
+        raise ValueError("pos values must be finite")
+    return (max(0.0, min(1.0, x)), max(0.0, min(1.0, y)))
 
 
 def _build_html(run_id: str) -> bytes:
@@ -859,6 +974,14 @@ class _Handler(BaseHTTPRequestHandler):
         stroke_ratio  = max(0.00, min(0.20, _safe_pct(req.get("stroke_ratio"),  0.08)))
         padding_scale = max(0.05, min(0.60, _safe_pct(req.get("padding_scale"), 0.22)))
 
+        # Draggable text positions — None → renderer default.
+        try:
+            top_pos    = _parse_pos(req.get("top_pos"))
+            bottom_pos = _parse_pos(req.get("bottom_pos"))
+        except ValueError as exc:
+            self._json_error(400, f"invalid position: {exc}")
+            return
+
         # --- render ---
         try:
             from PIL import Image
@@ -880,6 +1003,8 @@ class _Handler(BaseHTTPRequestHandler):
                 font_scale=font_scale,
                 stroke_ratio=stroke_ratio,
                 padding_scale=padding_scale,
+                top_pos=top_pos,
+                bottom_pos=bottom_pos,
             )
             result = _render(source, spec)
             buf = io.BytesIO()
