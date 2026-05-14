@@ -678,6 +678,59 @@ def main() -> None:
             f"/render zero-area crop: expected 400, got {s_crop_zero}"
         print(f"  /render zero-area crop → 400 OK")
 
+        # --- font selection ---
+
+        # known font IDs → 200
+        for fid in ("default", "sans", "serif", "mono"):
+            s_font, _ = _http_post_json(render_url, {
+                "image_b64": _minimal_png_b64(),
+                "top": "test",
+                "top_font": fid,
+                "bottom_font": fid,
+            })
+            assert s_font == 200, \
+                f"/render font_id={fid!r}: expected 200, got {s_font}"
+            print(f"  /render top_font={fid!r} bottom_font={fid!r} → 200 OK")
+
+        # absent font fields → 200 (server default)
+        s_nofont, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "top": "test",
+        })
+        assert s_nofont == 200, \
+            f"/render absent font fields: expected 200, got {s_nofont}"
+        print(f"  /render absent font fields → 200 (default) OK")
+
+        # unknown font ID string → 200 (silent fallback, no 400)
+        s_unkfont, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "top": "test",
+            "top_font": "comic-sans",
+        })
+        assert s_unkfont == 200, \
+            f"/render top_font='comic-sans' (unknown): expected 200 fallback, got {s_unkfont}"
+        print(f"  /render top_font='comic-sans' (unknown) → 200 (fallback) OK")
+
+        # non-string font ID → 400
+        s_badfont, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "top": "test",
+            "top_font": 42,
+        })
+        assert s_badfont == 400, \
+            f"/render top_font=42 (int): expected 400, got {s_badfont}"
+        print(f"  /render top_font=42 (non-string) → 400 OK")
+
+        # non-string bottom_font → 400
+        s_badbotfont, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "top": "test",
+            "bottom_font": ["mono"],
+        })
+        assert s_badbotfont == 400, \
+            f"/render bottom_font=['mono'] (list): expected 400, got {s_badbotfont}"
+        print(f"  /render bottom_font=['mono'] (non-string) → 400 OK")
+
         # --- clean shutdown on socket close ---
         f.close()   # close file-object first to release the dup'd fd
         conn.close()

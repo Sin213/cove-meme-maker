@@ -95,6 +95,27 @@ def _build_template_registry() -> dict[str, pathlib.Path]:
 
 _TEMPLATE_REGISTRY: dict[str, pathlib.Path] = _build_template_registry()
 
+# ---------------------------------------------------------------------------
+# Font allowlist — maps safe string IDs to ordered font filename chains.
+# Each chain is tried in order via ImageFont.truetype(name, size); the first
+# hit wins. No arbitrary paths reach the renderer from the client.
+# ---------------------------------------------------------------------------
+
+_FONT_IDS: dict[str, tuple[str, ...]] = {
+    "default": (),
+    "sans":  ("DejaVuSans-Bold.ttf",     "LiberationSans-Bold.ttf",  "NotoSans-Bold.ttf",    "arialbd.ttf"),
+    "serif": ("DejaVuSerif-Bold.ttf",    "LiberationSerif-Bold.ttf", "NotoSerif-Bold.ttf",   "timesbd.ttf"),
+    "mono":  ("DejaVuSansMono-Bold.ttf", "LiberationMono-Bold.ttf",  "NotoMono-Regular.ttf", "consolab.ttf", "cour.ttf"),
+}
+
+# Human-readable labels for the UI <select>
+_FONT_LABELS: dict[str, str] = {
+    "default": "Default",
+    "sans":    "Sans-serif",
+    "serif":   "Serif",
+    "mono":    "Monospace",
+}
+
 # Minimal HTML page
 # ---------------------------------------------------------------------------
 
@@ -202,6 +223,11 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
 .font-row{display:flex;align-items:center;gap:8px;padding:0 12px 12px}
 .font-display{flex:1;background:#11111a;color:#9a9aae;border:1px solid rgba(255,255,255,0.06);border-radius:7px;padding:7px 10px;font-size:12.5px}
 .font-add-btn{background:transparent;color:#6b6b80;border:1px solid rgba(255,255,255,0.06);border-radius:7px;padding:7px 12px;font-size:12px;cursor:default;opacity:0.5;font-family:inherit}
+
+.font-select-row{display:flex;align-items:center;gap:8px;padding:0 16px 12px}
+.font-select-lbl{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:12px;color:#9a9aae;width:52px;flex-shrink:0}
+select.font-select{flex:1;background:#11111a;color:#ececf1;border:1px solid rgba(255,255,255,0.06);border-radius:7px;padding:5px 8px;font-size:12.5px;font-family:inherit;cursor:pointer;appearance:none;-webkit-appearance:none;outline:none}
+select.font-select:focus{border-color:rgba(80,230,207,0.32)}
 
 #inspector-footer{display:flex;flex-direction:column;gap:8px;padding:12px;border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0}
 #export-btn{width:100%;padding:10px 18px;background:#50e6cf;color:#0a0a0e;border:1px solid rgba(255,255,255,0.18);border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
@@ -329,6 +355,24 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
           <input type="checkbox" id="all-caps" checked>
           <label for="all-caps">All caps</label>
         </div>
+        <div class="font-select-row">
+          <span class="font-select-lbl">Top</span>
+          <select class="font-select" id="top-font">
+            <option value="default">Default</option>
+            <option value="sans">Sans-serif</option>
+            <option value="serif">Serif</option>
+            <option value="mono">Monospace</option>
+          </select>
+        </div>
+        <div class="font-select-row">
+          <span class="font-select-lbl">Bottom</span>
+          <select class="font-select" id="bottom-font">
+            <option value="default">Default</option>
+            <option value="sans">Sans-serif</option>
+            <option value="serif">Serif</option>
+            <option value="mono">Monospace</option>
+          </select>
+        </div>
       </div>
 
       <div id="modern-section" style="display:none">
@@ -412,6 +456,8 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   var bottomText  = document.getElementById('bottom-text');
   var captionText = document.getElementById('caption-text');
   var allCaps     = document.getElementById('all-caps');
+  var topFontSel  = document.getElementById('top-font');
+  var bottomFontSel = document.getElementById('bottom-font');
   var topColor    = document.getElementById('top-color');
   var bottomColor = document.getElementById('bottom-color');
   var captionColor= document.getElementById('caption-color');
@@ -1051,6 +1097,8 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
         bottom_size_pct: bottomSizeSl.value === '0' ? null : parseInt(bottomSizeSl.value, 10),
         top_rotation:    parseInt(topRotSl.value, 10),
         bottom_rotation: parseInt(bottomRotSl.value, 10),
+        top_font:        topFontSel.value,
+        bottom_font:     bottomFontSel.value,
         crop: cropActive ? { x: cropRect.x, y: cropRect.y, width: cropRect.width, height: cropRect.height } : null,
       }),
     })
@@ -1237,6 +1285,21 @@ def _parse_crop(val: object) -> "tuple[float, float, float, float] | None":
     return (x, y, eff_w, eff_h)
 
 
+def _parse_font_id(val: object) -> "tuple[str, ...]":
+    """Validate a font ID from the request body.
+
+    * None / missing → empty tuple (renderer uses its default chain).
+    * Non-string → raises ValueError (caller → 400).
+    * Unknown string → empty tuple (silent fallback; no 400).
+    * Known string → the allowlist chain for that ID.
+    """
+    if val is None:
+        return ()
+    if not isinstance(val, str):
+        raise ValueError("font ID must be a string")
+    return _FONT_IDS.get(val, ())
+
+
 def _build_html(run_id: str) -> bytes:
     attr_val = html.escape(run_id, quote=True)
     return _HTML.replace("__RUN_ID_ATTR__", attr_val).encode("utf-8")
@@ -1419,6 +1482,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._json_error(400, f"invalid crop: {exc}")
             return
 
+        # Font IDs — non-string → 400; unknown string → silent default fallback.
+        try:
+            top_font_names    = _parse_font_id(req.get("top_font"))
+            bottom_font_names = _parse_font_id(req.get("bottom_font"))
+        except ValueError as exc:
+            self._json_error(400, f"invalid font: {exc}")
+            return
+
         # --- render ---
         try:
             from PIL import Image
@@ -1444,6 +1515,8 @@ class _Handler(BaseHTTPRequestHandler):
                 bottom_pos=bottom_pos,
                 top_size_pct=top_size_pct,
                 bottom_size_pct=bottom_size_pct,
+                top_font_names=top_font_names,
+                bottom_font_names=bottom_font_names,
                 top_rotation=top_rotation,
                 bottom_rotation=bottom_rotation,
                 crop=crop,

@@ -31,6 +31,9 @@ class MemeSpec:
     bottom: str = ""
     caption: str = ""
     font_path: Path | None = None
+    # Per-block font name chains (tried in order; empty = use font_path / default).
+    top_font_names: tuple[str, ...] = ()
+    bottom_font_names: tuple[str, ...] = ()
     # As a fraction of image height. Keeps text readable across resolutions.
     font_scale: float = 0.085
     # Stroke thickness as a fraction of font size (classic only).
@@ -114,7 +117,16 @@ def _apply_crop(img: Image.Image, crop: tuple[float, float, float, float]) -> Im
     return img.crop((left, top, right, bottom))
 
 
-def _font(path: Path | None, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def _font(
+    names: tuple[str, ...],
+    size: int,
+    path: Path | None = None,
+) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    for name in names:
+        try:
+            return ImageFont.truetype(name, size=size)
+        except OSError:
+            pass
     if path is not None:
         try:
             return ImageFont.truetype(str(path), size=size)
@@ -124,6 +136,10 @@ def _font(path: Path | None, size: int) -> ImageFont.FreeTypeFont | ImageFont.Im
         return ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
     except OSError:
         return ImageFont.load_default()
+
+
+def _block_font_names(spec: MemeSpec, which: Literal["top", "bottom"]) -> tuple[str, ...]:
+    return spec.top_font_names if which == "top" else spec.bottom_font_names
 
 
 def _block_font_size(h: int, spec: MemeSpec, which: Literal["top", "bottom"]) -> int:
@@ -175,7 +191,7 @@ def _render_classic_block(
     """
     w, h = img_size
     font_size = _block_font_size(h, spec, which)
-    font = _font(spec.font_path, font_size)
+    font = _font(_block_font_names(spec, which), font_size, spec.font_path)
     stroke = 0 if spec.stroke_ratio == 0.0 else max(1, int(font_size * spec.stroke_ratio))
     max_width = int(w * (1.0 - 2 * spec.side_margin))
     xform = str.upper if spec.uppercase else (lambda s: s)
@@ -242,7 +258,7 @@ def _render_modern(img: Image.Image, spec: MemeSpec) -> Image.Image:
         return img.copy()
 
     font_size = max(12, int(h * spec.font_scale))
-    font = _font(spec.font_path, font_size)
+    font = _font((), font_size, spec.font_path)
     max_width = int(w * (1.0 - 2 * spec.side_margin))
 
     measurer = ImageDraw.Draw(Image.new("RGB", (1, 1)))
@@ -286,7 +302,7 @@ def classic_block_geometry(
         return None
     w, h = img_size
     font_size = _block_font_size(h, spec, which)
-    font = _font(spec.font_path, font_size)
+    font = _font(_block_font_names(spec, which), font_size, spec.font_path)
     stroke = 0 if spec.stroke_ratio == 0.0 else max(1, int(font_size * spec.stroke_ratio))
     max_width = int(w * (1.0 - 2 * spec.side_margin))
     xform = str.upper if spec.uppercase else (lambda s: s)
