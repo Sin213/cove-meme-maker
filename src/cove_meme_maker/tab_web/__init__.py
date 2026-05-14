@@ -141,6 +141,10 @@ html,body{height:100%;overflow:hidden;font-family:"Geist",Inter,ui-sans-serif,sy
 .drag-handle{position:absolute;width:28px;height:28px;border-radius:50%;background:rgba(80,230,207,0.85);color:#0a0a0e;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;cursor:grab;transform:translate(-50%,-50%);pointer-events:all;user-select:none;border:2px solid rgba(255,255,255,0.6)}
 .drag-handle:active{cursor:grabbing;background:rgba(80,230,207,1)}
 .drag-handle.hidden{display:none}
+.sub-handle{position:absolute;width:20px;height:20px;display:flex;align-items:center;justify-content:center;transform:translate(-50%,-50%);pointer-events:all;user-select:none;border:1.5px solid rgba(255,255,255,0.5);background:rgba(80,230,207,0.65);color:#0a0a0e;font-size:10px;font-weight:700}
+.sub-handle.hidden{display:none}
+.resize-handle{cursor:ew-resize;border-radius:3px}
+.rotate-handle{cursor:ew-resize;border-radius:50%}
 
 /* Crop overlay */
 #crop-overlay{position:absolute;inset:0;pointer-events:none;display:none}
@@ -246,6 +250,10 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
         <div id="handle-layer">
           <div id="top-handle" class="drag-handle hidden">T</div>
           <div id="bottom-handle" class="drag-handle hidden">B</div>
+          <div id="top-resize-handle" class="sub-handle resize-handle hidden">&#8596;</div>
+          <div id="top-rotate-handle" class="sub-handle rotate-handle hidden">&#8635;</div>
+          <div id="bottom-resize-handle" class="sub-handle resize-handle hidden">&#8596;</div>
+          <div id="bottom-rotate-handle" class="sub-handle rotate-handle hidden">&#8635;</div>
         </div>
         <div id="crop-overlay">
           <div id="crop-shade-t"></div>
@@ -421,6 +429,10 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   var galleryStrip = document.getElementById('gallery-strip');
   var topHandle    = document.getElementById('top-handle');
   var bottomHandle = document.getElementById('bottom-handle');
+  var topResizeHandle    = document.getElementById('top-resize-handle');
+  var topRotateHandle    = document.getElementById('top-rotate-handle');
+  var bottomResizeHandle = document.getElementById('bottom-resize-handle');
+  var bottomRotateHandle = document.getElementById('bottom-rotate-handle');
   var topSizeSl     = document.getElementById('top-size-sl');
   var bottomSizeSl  = document.getElementById('bottom-size-sl');
   var topRotSl      = document.getElementById('top-rot-sl');
@@ -451,6 +463,7 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   var cropActive = false;
   var cropRect   = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
   var cropDragging = null; // null | 'tl'|'tr'|'bl'|'br'
+  var subDragging  = null; // null | {which:'top'|'bottom', type:'resize'|'rotate', startX, startVal}
 
   function setStatus(msg, pulse) {
     statusMsg.textContent = msg;
@@ -464,16 +477,41 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
     handle.style.top  = (imgRect.top  - wrapRect.top  + ny * imgRect.height) + 'px';
   }
 
+  function _placeSubHandles(which, nx, ny) {
+    var imgRect  = previewImg.getBoundingClientRect();
+    var wrapRect = previewWrap.getBoundingClientRect();
+    var cx = imgRect.left - wrapRect.left + nx * imgRect.width;
+    var cy = imgRect.top  - wrapRect.top  + ny * imgRect.height;
+    var rh = which === 'top' ? topResizeHandle    : bottomResizeHandle;
+    var oh = which === 'top' ? topRotateHandle    : bottomRotateHandle;
+    rh.style.left = (cx + 28) + 'px';
+    rh.style.top  = cy + 'px';
+    oh.style.left = cx + 'px';
+    oh.style.top  = (cy - 28) + 'px';
+  }
+
   function _showHandles() {
-    _placeHandle(topHandle,    topPos    ? topPos[0]    : 0.5, topPos    ? topPos[1]    : 0.10);
-    _placeHandle(bottomHandle, bottomPos ? bottomPos[0] : 0.5, bottomPos ? bottomPos[1] : 0.90);
+    var tnx = topPos    ? topPos[0]    : 0.5, tny = topPos    ? topPos[1]    : 0.10;
+    var bnx = bottomPos ? bottomPos[0] : 0.5, bny = bottomPos ? bottomPos[1] : 0.90;
+    _placeHandle(topHandle,    tnx, tny);
+    _placeHandle(bottomHandle, bnx, bny);
+    _placeSubHandles('top',    tnx, tny);
+    _placeSubHandles('bottom', bnx, bny);
     topHandle.classList.remove('hidden');
     bottomHandle.classList.remove('hidden');
+    topResizeHandle.classList.remove('hidden');
+    topRotateHandle.classList.remove('hidden');
+    bottomResizeHandle.classList.remove('hidden');
+    bottomRotateHandle.classList.remove('hidden');
   }
 
   function _hideHandles() {
     topHandle.classList.add('hidden');
     bottomHandle.classList.add('hidden');
+    topResizeHandle.classList.add('hidden');
+    topRotateHandle.classList.add('hidden');
+    bottomResizeHandle.classList.add('hidden');
+    bottomRotateHandle.classList.add('hidden');
   }
 
   function _resetHandles() {
@@ -616,9 +654,11 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
     if (dragging === 'top') {
       topPos = [nx, ny];
       _placeHandle(topHandle, nx, ny);
+      _placeSubHandles('top', nx, ny);
     } else {
       bottomPos = [nx, ny];
       _placeHandle(bottomHandle, nx, ny);
+      _placeSubHandles('bottom', nx, ny);
     }
   }
 
@@ -634,9 +674,63 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   }, { passive: false });
   window.addEventListener('touchend', function () { dragging = null; });
 
+  function _onSubDragMove(clientX) {
+    if (!subDragging) return;
+    var dx = clientX - subDragging.startX;
+    if (subDragging.type === 'resize') {
+      var sl = subDragging.which === 'top' ? topSizeSl : bottomSizeSl;
+      var vd = subDragging.which === 'top' ? topSizeVal : bottomSizeVal;
+      var newVal = Math.round(Math.max(parseFloat(sl.min), Math.min(parseFloat(sl.max), subDragging.startVal + dx * 0.2)));
+      sl.value = newVal;
+      vd.textContent = newVal === 0 ? 'Auto' : newVal + '%';
+      fillSlider(sl);
+    } else {
+      var sl = subDragging.which === 'top' ? topRotSl : bottomRotSl;
+      var vd = subDragging.which === 'top' ? topRotVal : bottomRotVal;
+      var newVal = Math.round(Math.max(parseFloat(sl.min), Math.min(parseFloat(sl.max), subDragging.startVal + dx * 1.0)));
+      sl.value = newVal;
+      vd.textContent = newVal + '°';
+      fillSlider(sl);
+    }
+  }
+
+  function _subHandleDown(e, which, type) {
+    e.preventDefault();
+    e.stopPropagation();
+    var sl = type === 'resize'
+      ? (which === 'top' ? topSizeSl : bottomSizeSl)
+      : (which === 'top' ? topRotSl  : bottomRotSl);
+    subDragging = { which: which, type: type, startX: e.clientX || (e.touches && e.touches[0].clientX), startVal: parseFloat(sl.value) };
+  }
+
+  topResizeHandle.addEventListener('mousedown',    function (e) { _subHandleDown(e, 'top',    'resize'); });
+  topRotateHandle.addEventListener('mousedown',    function (e) { _subHandleDown(e, 'top',    'rotate'); });
+  bottomResizeHandle.addEventListener('mousedown', function (e) { _subHandleDown(e, 'bottom', 'resize'); });
+  bottomRotateHandle.addEventListener('mousedown', function (e) { _subHandleDown(e, 'bottom', 'rotate'); });
+
+  topResizeHandle.addEventListener('touchstart',    function (e) { _subHandleDown(e, 'top',    'resize'); }, { passive: false });
+  topRotateHandle.addEventListener('touchstart',    function (e) { _subHandleDown(e, 'top',    'rotate'); }, { passive: false });
+  bottomResizeHandle.addEventListener('touchstart', function (e) { _subHandleDown(e, 'bottom', 'resize'); }, { passive: false });
+  bottomRotateHandle.addEventListener('touchstart', function (e) { _subHandleDown(e, 'bottom', 'rotate'); }, { passive: false });
+
+  window.addEventListener('mousemove', function (e) { if (subDragging) _onSubDragMove(e.clientX); });
+  window.addEventListener('mouseup',   function ()  { subDragging = null; });
+  window.addEventListener('touchmove', function (e) {
+    if (subDragging) { e.preventDefault(); _onSubDragMove(e.touches[0].clientX); }
+  }, { passive: false });
+  window.addEventListener('touchend', function () { subDragging = null; });
+
   window.addEventListener('resize', function () {
-    if (!topHandle.classList.contains('hidden'))    _placeHandle(topHandle,    topPos    ? topPos[0]    : 0.5, topPos    ? topPos[1]    : 0.10);
-    if (!bottomHandle.classList.contains('hidden')) _placeHandle(bottomHandle, bottomPos ? bottomPos[0] : 0.5, bottomPos ? bottomPos[1] : 0.90);
+    if (!topHandle.classList.contains('hidden')) {
+      var tnx = topPos    ? topPos[0]    : 0.5, tny = topPos    ? topPos[1]    : 0.10;
+      _placeHandle(topHandle,    tnx, tny);
+      _placeSubHandles('top',    tnx, tny);
+    }
+    if (!bottomHandle.classList.contains('hidden')) {
+      var bnx = bottomPos ? bottomPos[0] : 0.5, bny = bottomPos ? bottomPos[1] : 0.90;
+      _placeHandle(bottomHandle, bnx, bny);
+      _placeSubHandles('bottom', bnx, bny);
+    }
     if (cropActive) _updateCropOverlay();
   });
 
