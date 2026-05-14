@@ -54,157 +54,419 @@ _HTML = """\
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cove Meme Maker — tab-web mode</title>
+<title>Cove Meme Maker</title>
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; script-src 'unsafe-inline'">
 <style>
-body {
-  font-family: system-ui, sans-serif;
-  max-width: 640px;
-  margin: 2rem auto;
-  padding: 0 1rem;
-  background: #1a1a2e;
-  color: #eee;
-}
-h1 { font-size: 1.2rem; color: #a0c4ff; margin-bottom: 0.2rem; }
-.meta { font-size: 0.75rem; color: #666; margin-bottom: 1.5rem; }
-label { display: block; margin-bottom: 0.25rem; font-size: 0.85rem; color: #aaa; }
-input[type=text], select {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 0.4rem 0.6rem;
-  background: #2a2a3e;
-  border: 1px solid #444;
-  border-radius: 4px;
-  color: #eee;
-  margin-bottom: 0.75rem;
-}
-input[type=file] { margin-bottom: 0.75rem; }
-button {
-  padding: 0.5rem 1.2rem;
-  background: #4a7fbf;
-  border: none;
-  border-radius: 4px;
-  color: #fff;
-  cursor: pointer;
-  margin-right: 0.5rem;
-}
-button:disabled { opacity: 0.4; cursor: not-allowed; }
-#preview img { max-width: 100%; border-radius: 6px; margin-top: 1rem; }
-#status { font-size: 0.8rem; color: #aaa; margin-top: 0.5rem; min-height: 1.2em; }
-.note {
-  background: #2a2a1e;
-  border-left: 3px solid #a08040;
-  padding: 0.5rem 0.75rem;
-  font-size: 0.8rem;
-  color: #cca;
-  margin-top: 1.5rem;
-  border-radius: 0 4px 4px 0;
-}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;font-family:"Geist",Inter,ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif;font-size:13px;background:#0a0a0e;color:#ececf1}
+#app{display:flex;height:100%}
+
+/* Canvas pane */
+#canvas-pane{display:flex;flex-direction:column;flex:1;overflow:hidden;border-right:1px solid rgba(255,255,255,0.06)}
+#canvas-header{display:flex;align-items:center;gap:8px;padding:0 16px;height:36px;background:#0a0a0e;border-bottom:1px solid rgba(255,255,255,0.06);flex-shrink:0}
+#header-title{font-size:12.5px;font-weight:500;color:#9a9aae;flex:1}
+#header-session{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:10px;color:#6b6b80}
+#canvas-toolbar{display:flex;align-items:center;gap:8px;padding:0 12px;height:36px;background:rgba(255,255,255,0.01);border-bottom:1px solid rgba(255,255,255,0.06);flex-shrink:0}
+#file-name{font-size:12.5px;font-weight:500;color:#ececf1;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#file-meta{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:10.5px;color:#6b6b80;white-space:nowrap}
+.tb-btn{background:transparent;color:#9a9aae;border:1px solid rgba(255,255,255,0.10);border-radius:6px;padding:0 10px;font-size:12px;height:26px;cursor:pointer;font-family:inherit;white-space:nowrap;flex-shrink:0;line-height:1}
+.tb-btn:hover:not(:disabled){color:#ececf1;background:#161620}
+.tb-btn:disabled{color:#6b6b80;border-color:rgba(255,255,255,0.06);cursor:default}
+.tb-btn.accent{background:#50e6cf;color:#0a0a0e;border-color:rgba(255,255,255,0.18);font-weight:600}
+.tb-btn.accent:hover:not(:disabled){background:#6cf0db}
+.tb-btn.accent:disabled{background:#161620;color:#6b6b80;border-color:rgba(255,255,255,0.06)}
+
+#canvas-stage{flex:1;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#08080d;transition:background 0.12s}
+#canvas-stage.drag-over{background:rgba(80,230,207,0.04)}
+#drop-zone{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;border:1.5px dashed rgba(255,255,255,0.16);border-radius:12px;width:90%;max-width:480px;padding:48px 32px;text-align:center;transition:border-color 0.12s}
+#canvas-stage.drag-over #drop-zone{border-color:rgba(80,230,207,0.40)}
+#dz-title{font-size:15px;font-weight:500;color:#9a9aae}
+#dz-sub{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:11px;color:#6b6b80;letter-spacing:0.04em}
+#choose-btn{margin-top:12px;background:transparent;color:#9a9aae;border:1px solid rgba(255,255,255,0.10);border-radius:8px;padding:8px 18px;font-size:12.5px;cursor:pointer;font-family:inherit}
+#choose-btn:hover{color:#ececf1;background:#161620}
+#preview-wrap{display:none;width:100%;height:100%;align-items:center;justify-content:center;padding:16px}
+#preview-img{max-width:100%;max-height:100%;object-fit:contain;border-radius:4px}
+
+#canvas-statusbar{display:flex;align-items:center;gap:8px;padding:0 12px;height:28px;background:rgba(255,255,255,0.012);border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0}
+#status-pulse{width:6px;height:6px;border-radius:3px;background:#3ddc97;flex-shrink:0;transition:background 0.2s}
+#status-msg{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:10.5px;color:#6b6b80;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Inspector */
+#inspector{display:flex;flex-direction:column;width:380px;flex-shrink:0;background:#0d0d13;overflow:hidden}
+#inspector-body{flex:1;overflow-y:auto;overflow-x:hidden;padding-bottom:8px}
+#inspector-body::-webkit-scrollbar{width:6px}
+#inspector-body::-webkit-scrollbar-track{background:transparent}
+#inspector-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:3px}
+
+.sec-label{display:block;font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:10.5px;letter-spacing:0.12em;font-weight:500;color:#6b6b80;text-transform:uppercase;padding:16px 16px 8px}
+.sec-divider{height:1px;background:rgba(255,255,255,0.06);margin:4px 0}
+#seg-frame{display:flex;margin:0 12px 12px;background:#11111a;border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:3px;gap:2px}
+.seg-btn{flex:1;background:transparent;color:#9a9aae;border:none;border-radius:6px;padding:7px 0;font-size:12.5px;cursor:pointer;font-family:inherit}
+.seg-btn:hover{color:#ececf1}
+.seg-btn.active{background:#1c1c28;color:#ececf1}
+
+.field-label{display:block;font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:12px;color:#9a9aae;padding:0 16px 6px}
+.field-row{display:flex;align-items:flex-start;gap:8px;padding:0 12px 12px}
+textarea.field-ta{flex:1;background:#11111a;color:#ececf1;border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:8px 10px;font-size:13px;font-family:inherit;resize:none;height:60px;line-height:1.4}
+textarea.field-ta:focus{outline:none;border-color:rgba(80,230,207,0.32);background:#161620}
+textarea.field-ta.caption{height:76px}
+
+.color-btn{display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;border:1px solid rgba(255,255,255,0.16);cursor:pointer;position:relative;flex-shrink:0;overflow:hidden;margin-top:6px}
+.color-swatch{display:block;width:20px;height:20px;border-radius:3px;pointer-events:none}
+.color-btn input[type="color"]{opacity:0;position:absolute;width:0;height:0;padding:0;border:none;cursor:pointer}
+
+.check-row{display:flex;align-items:center;gap:8px;padding:0 16px 12px}
+.check-row input[type="checkbox"]{width:16px;height:16px;accent-color:#50e6cf;cursor:pointer;flex-shrink:0}
+.check-row label{font-size:12.5px;color:#ececf1;cursor:pointer}
+
+.slider-row{display:flex;align-items:center;gap:10px;padding:0 16px 14px}
+.slider-lbl{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:12px;color:#9a9aae;width:52px;flex-shrink:0}
+input[type="range"].slider{flex:1;-webkit-appearance:none;appearance:none;height:4px;border-radius:2px;outline:none;cursor:pointer;background:#1c1c28}
+input[type="range"].slider::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid #0a0a0e;cursor:pointer}
+input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid #0a0a0e;cursor:pointer}
+.slider-val{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:12px;color:#9a9aae;width:36px;text-align:right;flex-shrink:0}
+
+.font-row{display:flex;align-items:center;gap:8px;padding:0 12px 12px}
+.font-display{flex:1;background:#11111a;color:#9a9aae;border:1px solid rgba(255,255,255,0.06);border-radius:7px;padding:7px 10px;font-size:12.5px}
+.font-add-btn{background:transparent;color:#6b6b80;border:1px solid rgba(255,255,255,0.06);border-radius:7px;padding:7px 12px;font-size:12px;cursor:default;opacity:0.5;font-family:inherit}
+
+#inspector-footer{display:flex;flex-direction:column;gap:8px;padding:12px;border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0}
+#export-btn{width:100%;padding:10px 18px;background:#50e6cf;color:#0a0a0e;border:1px solid rgba(255,255,255,0.18);border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
+#export-btn:hover:not(:disabled){background:#6cf0db}
+#export-btn:disabled{background:#161620;color:#6b6b80;border-color:rgba(255,255,255,0.06);cursor:default}
+#copy-btn{width:100%;padding:10px 18px;background:#11111a;color:#9a9aae;border:1px solid rgba(255,255,255,0.06);border-radius:9px;font-size:13px;cursor:pointer;font-family:inherit}
+#copy-btn:hover:not(:disabled){color:#ececf1;background:#161620;border-color:rgba(255,255,255,0.10)}
+#copy-btn:disabled{color:#6b6b80;cursor:default}
 </style>
 </head>
 <body>
-<h1>Cove Meme Maker — tab-web mode</h1>
-<p class="meta">Session: <code id="sessionId" data-run-id="__RUN_ID_ATTR__"></code></p>
+<input type="file" id="file-input" accept="image/*" style="display:none">
+<div id="app">
 
-<label>Source image</label>
-<input type="file" id="imageFile" accept="image/*">
+  <div id="canvas-pane">
+    <div id="canvas-header">
+      <span id="header-title">Cove Meme Maker</span>
+      <span id="header-session">Session&#x2009;<code id="session-id" data-run-id="__RUN_ID_ATTR__"></code></span>
+    </div>
+    <div id="canvas-toolbar">
+      <span id="file-name">No file</span>
+      <span id="file-meta"></span>
+      <button class="tb-btn accent" id="render-btn" disabled>Render</button>
+      <button class="tb-btn" id="clear-btn" disabled>Clear</button>
+    </div>
+    <div id="canvas-stage">
+      <div id="drop-zone">
+        <div id="dz-title">Drop an image to begin</div>
+        <div id="dz-sub">PNG&#x2009;&middot;&#x2009;JPG&#x2009;&middot;&#x2009;WebP&#x2009;&middot;&#x2009;BMP</div>
+        <button id="choose-btn">Choose file</button>
+      </div>
+      <div id="preview-wrap">
+        <img id="preview-img" alt="">
+      </div>
+    </div>
+    <div id="canvas-statusbar">
+      <div id="status-pulse"></div>
+      <span id="status-msg">Ready</span>
+    </div>
+  </div>
 
-<label>Style</label>
-<select id="style">
-  <option value="classic">Classic (top/bottom text)</option>
-  <option value="modern">Modern (caption band)</option>
-</select>
+  <div id="inspector">
+    <div id="inspector-body">
 
-<div id="classicFields">
-  <label>Top text</label>
-  <input type="text" id="topText" placeholder="TOP TEXT">
+      <span class="sec-label">Style</span>
+      <div id="seg-frame">
+        <button class="seg-btn active" id="btn-classic">Classic</button>
+        <button class="seg-btn" id="btn-modern">Modern</button>
+      </div>
 
-  <label>Bottom text</label>
-  <input type="text" id="bottomText" placeholder="BOTTOM TEXT">
+      <div id="classic-section">
+        <span class="field-label">Top text</span>
+        <div class="field-row">
+          <textarea class="field-ta" id="top-text" placeholder="TOP TEXT"></textarea>
+          <label class="color-btn" title="Top text colour">
+            <span class="color-swatch" id="top-swatch"></span>
+            <input type="color" id="top-color" value="#ffffff">
+          </label>
+        </div>
+        <span class="field-label">Bottom text</span>
+        <div class="field-row">
+          <textarea class="field-ta" id="bottom-text" placeholder="BOTTOM TEXT"></textarea>
+          <label class="color-btn" title="Bottom text colour">
+            <span class="color-swatch" id="bottom-swatch"></span>
+            <input type="color" id="bottom-color" value="#ffffff">
+          </label>
+        </div>
+        <div class="check-row">
+          <input type="checkbox" id="all-caps" checked>
+          <label for="all-caps">All caps</label>
+        </div>
+      </div>
+
+      <div id="modern-section" style="display:none">
+        <span class="field-label">Caption</span>
+        <div class="field-row">
+          <label class="color-btn" title="Caption colour">
+            <span class="color-swatch" id="caption-swatch"></span>
+            <input type="color" id="caption-color" value="#000000">
+          </label>
+          <textarea class="field-ta caption" id="caption-text" placeholder="Caption"></textarea>
+        </div>
+      </div>
+
+      <div class="sec-divider"></div>
+      <span class="sec-label">Typography</span>
+
+      <div class="font-row">
+        <div class="font-display">Impact</div>
+        <button class="font-add-btn" disabled>+ Font</button>
+      </div>
+
+      <div class="slider-row">
+        <span class="slider-lbl">Size</span>
+        <input type="range" class="slider" id="size-sl" min="2" max="30" value="9">
+        <span class="slider-val" id="size-val">9%</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-lbl">Stroke</span>
+        <input type="range" class="slider" id="stroke-sl" min="0" max="20" value="8">
+        <span class="slider-val" id="stroke-val">8%</span>
+      </div>
+      <div class="slider-row">
+        <span class="slider-lbl">Padding</span>
+        <input type="range" class="slider" id="pad-sl" min="5" max="60" value="22">
+        <span class="slider-val" id="pad-val">22%</span>
+      </div>
+
+    </div>
+
+    <div id="inspector-footer">
+      <button id="export-btn" disabled>Export PNG</button>
+      <button id="copy-btn" disabled>Copy to clipboard</button>
+    </div>
+  </div>
+
 </div>
-
-<div id="modernFields" style="display:none">
-  <label>Caption</label>
-  <input type="text" id="captionText" placeholder="Caption">
-</div>
-
-<button id="renderBtn" disabled>Render</button>
-<button id="exportBtn" disabled>Export PNG</button>
-
-<div id="status"></div>
-<div id="preview"></div>
-
-<div class="note">
-  <strong>Phase 2 scope:</strong> drag handles, font picker, colour picker,
-  rotation, template discovery, and full UI parity are deferred to a later phase.
-</div>
-
 <script>
 (function () {
-  var sessionEl = document.getElementById('sessionId');
-  var RUN_ID = sessionEl.dataset.runId || '';
-  sessionEl.textContent = RUN_ID;
+  'use strict';
 
-  var styleEl   = document.getElementById('style');
-  var classic   = document.getElementById('classicFields');
-  var modern    = document.getElementById('modernFields');
-  styleEl.addEventListener('change', function () {
-    classic.style.display = styleEl.value === 'classic' ? '' : 'none';
-    modern.style.display  = styleEl.value === 'modern'  ? '' : 'none';
+  var sessionEl = document.getElementById('session-id');
+  sessionEl.textContent = sessionEl.dataset.runId || '';
+
+  var fileInput   = document.getElementById('file-input');
+  var fileNameEl  = document.getElementById('file-name');
+  var fileMetaEl  = document.getElementById('file-meta');
+  var renderBtn   = document.getElementById('render-btn');
+  var clearBtn    = document.getElementById('clear-btn');
+  var stage       = document.getElementById('canvas-stage');
+  var dropZone    = document.getElementById('drop-zone');
+  var previewWrap = document.getElementById('preview-wrap');
+  var previewImg  = document.getElementById('preview-img');
+  var statusPulse = document.getElementById('status-pulse');
+  var statusMsg   = document.getElementById('status-msg');
+  var chooseBtn   = document.getElementById('choose-btn');
+  var btnClassic  = document.getElementById('btn-classic');
+  var btnModern   = document.getElementById('btn-modern');
+  var classicSec  = document.getElementById('classic-section');
+  var modernSec   = document.getElementById('modern-section');
+  var topText     = document.getElementById('top-text');
+  var bottomText  = document.getElementById('bottom-text');
+  var captionText = document.getElementById('caption-text');
+  var allCaps     = document.getElementById('all-caps');
+  var topColor    = document.getElementById('top-color');
+  var bottomColor = document.getElementById('bottom-color');
+  var captionColor= document.getElementById('caption-color');
+  var topSwatch   = document.getElementById('top-swatch');
+  var bottomSwatch= document.getElementById('bottom-swatch');
+  var captionSwatch=document.getElementById('caption-swatch');
+  var sizeSl      = document.getElementById('size-sl');
+  var strokeSl    = document.getElementById('stroke-sl');
+  var padSl       = document.getElementById('pad-sl');
+  var sizeVal     = document.getElementById('size-val');
+  var strokeVal   = document.getElementById('stroke-val');
+  var padVal      = document.getElementById('pad-val');
+  var exportBtn   = document.getElementById('export-btn');
+  var copyBtn     = document.getElementById('copy-btn');
+
+  var styleMode    = 'classic';
+  var currentDataUrl = null;
+  var lastPng      = null;
+  var renderToken  = 0;
+
+  function setStatus(msg, pulse) {
+    statusMsg.textContent = msg;
+    statusPulse.style.background = pulse || '#3ddc97';
+  }
+
+  function fillSlider(sl) {
+    var pct = ((sl.value - sl.min) / (sl.max - sl.min)) * 100;
+    sl.style.background =
+      'linear-gradient(to right,#50e6cf ' + pct + '%,#1c1c28 ' + pct + '%)';
+  }
+  [sizeSl, strokeSl, padSl].forEach(fillSlider);
+
+  sizeSl.addEventListener('input', function () {
+    sizeVal.textContent = sizeSl.value + '%'; fillSlider(sizeSl);
+  });
+  strokeSl.addEventListener('input', function () {
+    strokeVal.textContent = strokeSl.value + '%'; fillSlider(strokeSl);
+  });
+  padSl.addEventListener('input', function () {
+    padVal.textContent = padSl.value + '%'; fillSlider(padSl);
   });
 
-  var fileInput = document.getElementById('imageFile');
-  var renderBtn = document.getElementById('renderBtn');
-  var exportBtn = document.getElementById('exportBtn');
-  var statusEl  = document.getElementById('status');
-  var previewEl = document.getElementById('preview');
-  var lastPng   = null;
+  function syncSwatch(inp, sw) { sw.style.background = inp.value; }
+  syncSwatch(topColor, topSwatch);
+  syncSwatch(bottomColor, bottomSwatch);
+  syncSwatch(captionColor, captionSwatch);
+  topColor.addEventListener('input', function () { syncSwatch(topColor, topSwatch); });
+  bottomColor.addEventListener('input', function () { syncSwatch(bottomColor, bottomSwatch); });
+  captionColor.addEventListener('input', function () { syncSwatch(captionColor, captionSwatch); });
+
+  function setStyle(mode) {
+    styleMode = mode;
+    btnClassic.classList.toggle('active', mode === 'classic');
+    btnModern.classList.toggle('active', mode === 'modern');
+    classicSec.style.display = mode === 'classic' ? '' : 'none';
+    modernSec.style.display  = mode === 'modern'  ? '' : 'none';
+  }
+  btnClassic.addEventListener('click', function () { setStyle('classic'); });
+  btnModern.addEventListener('click', function () { setStyle('modern'); });
+
+  function loadFile(file) {
+    if (!file) return;
+    var myLoadToken = ++renderToken;
+    currentDataUrl = null;
+    lastPng = null;
+    renderBtn.disabled = true;
+    exportBtn.disabled = true;
+    copyBtn.disabled   = true;
+    fileNameEl.textContent = file.name;
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      if (myLoadToken !== renderToken) return;
+      currentDataUrl = e.target.result;
+      var img = new Image();
+      img.onload = function () {
+        if (myLoadToken !== renderToken) return;
+        fileMetaEl.textContent =
+          img.naturalWidth + ' × ' + img.naturalHeight +
+          ' · ' + (file.size / 1024).toFixed(0) + ' KB';
+        renderBtn.disabled = false;
+        clearBtn.disabled  = false;
+        dropZone.style.display    = 'none';
+        previewWrap.style.display = 'flex';
+        previewImg.src = currentDataUrl;
+        setStatus('Image loaded — press Render');
+      };
+      img.onerror = function () {
+        if (myLoadToken !== renderToken) return;
+        currentDataUrl = null;
+        fileMetaEl.textContent = '';
+        previewWrap.style.display = 'none';
+        previewImg.src = '';
+        dropZone.style.display = '';
+        setStatus('Not a valid image', '#ff6b6b');
+      };
+      img.src = e.target.result;
+    };
+    reader.onerror = function () {
+      if (myLoadToken !== renderToken) return;
+      currentDataUrl = null;
+      fileMetaEl.textContent = '';
+      previewWrap.style.display = 'none';
+      previewImg.src = '';
+      dropZone.style.display = '';
+      setStatus('Could not read file', '#ff6b6b');
+    };
+    reader.readAsDataURL(file);
+  }
 
   fileInput.addEventListener('change', function () {
-    renderBtn.disabled = !fileInput.files.length;
+    if (fileInput.files.length) loadFile(fileInput.files[0]);
+  });
+  chooseBtn.addEventListener('click', function () { fileInput.click(); });
+
+  clearBtn.addEventListener('click', function () {
+    renderToken++;
+    currentDataUrl = null;
+    lastPng = null;
+    fileInput.value = '';
+    fileNameEl.textContent = 'No file';
+    fileMetaEl.textContent = '';
+    renderBtn.disabled = true;
+    clearBtn.disabled  = true;
+    exportBtn.disabled = true;
+    copyBtn.disabled   = true;
+    previewWrap.style.display = 'none';
+    previewImg.src = '';
+    dropZone.style.display = '';
+    setStatus('Ready');
+  });
+
+  stage.addEventListener('dragover', function (e) {
+    e.preventDefault();
+    stage.classList.add('drag-over');
+  });
+  stage.addEventListener('dragleave', function (e) {
+    if (!stage.contains(e.relatedTarget)) {
+      stage.classList.remove('drag-over');
+    }
+  });
+  stage.addEventListener('drop', function (e) {
+    e.preventDefault();
+    stage.classList.remove('drag-over');
+    var f = e.dataTransfer.files[0];
+    if (f) loadFile(f);
   });
 
   renderBtn.addEventListener('click', function () {
-    if (!fileInput.files.length) return;
-    var reader = new FileReader();
-    reader.onload = function (e) {
-      var b64 = e.target.result.split(',')[1];
-      statusEl.textContent = 'Rendering…';
-      renderBtn.disabled = true;
-      exportBtn.disabled = true;
-      fetch('/render', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          image_b64: b64,
-          style:     styleEl.value,
-          top:       document.getElementById('topText').value,
-          bottom:    document.getElementById('bottomText').value,
-          caption:   document.getElementById('captionText').value
-        })
-      })
-      .then(function (r) {
-        if (!r.ok) return r.json().then(function (d) { throw new Error(d.error || r.status); });
-        return r.json();
-      })
-      .then(function (data) {
-        lastPng = data.preview_b64;
-        previewEl.innerHTML = '';
-        var img = new Image();
-        img.src = 'data:image/png;base64,' + data.preview_b64;
-        previewEl.appendChild(img);
-        exportBtn.disabled = false;
-        statusEl.textContent = 'Done.';
-      })
-      .catch(function (err) {
-        statusEl.textContent = 'Error: ' + err.message;
-      })
-      .finally(function () {
-        renderBtn.disabled = false;
-      });
-    };
-    reader.readAsDataURL(fileInput.files[0]);
+    if (!currentDataUrl) return;
+    var myToken = ++renderToken;
+    var b64 = currentDataUrl.split(',')[1];
+    setStatus('Rendering…', '#ffb454');
+    renderBtn.disabled = true;
+    exportBtn.disabled = true;
+    copyBtn.disabled   = true;
+    fetch('/render', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image_b64: b64,
+        style:     styleMode,
+        top:       topText.value,
+        bottom:    bottomText.value,
+        caption:   captionText.value,
+        uppercase: allCaps.checked,
+      }),
+    })
+    .then(function (r) {
+      if (!r.ok) {
+        return r.json().then(function (d) {
+          throw new Error(d.error || ('HTTP ' + r.status));
+        });
+      }
+      return r.json();
+    })
+    .then(function (data) {
+      if (myToken !== renderToken) return;
+      lastPng = data.preview_b64;
+      previewImg.src = 'data:image/png;base64,' + data.preview_b64;
+      previewWrap.style.display = 'flex';
+      dropZone.style.display    = 'none';
+      exportBtn.disabled = false;
+      copyBtn.disabled   = false;
+      setStatus('Rendered');
+    })
+    .catch(function (err) {
+      if (myToken !== renderToken) return;
+      setStatus('Error: ' + err.message, '#ff6b6b');
+    })
+    .finally(function () {
+      if (myToken !== renderToken) return;
+      renderBtn.disabled = false;
+    });
   });
 
   exportBtn.addEventListener('click', function () {
@@ -214,6 +476,22 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
     a.download = 'meme.png';
     a.click();
   });
+
+  copyBtn.addEventListener('click', function () {
+    if (!lastPng) return;
+    if (!window.ClipboardItem || !navigator.clipboard || !navigator.clipboard.write) {
+      setStatus('Clipboard write not available in this browser', '#ffb454');
+      return;
+    }
+    var bin = atob(lastPng);
+    var arr = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    var blob = new Blob([arr], { type: 'image/png' });
+    navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+      .then(function () { setStatus('Copied to clipboard'); })
+      .catch(function (e) { setStatus('Copy failed: ' + e.message, '#ff6b6b'); });
+  });
+
 }());
 </script>
 </body>
@@ -328,6 +606,7 @@ class _Handler(BaseHTTPRequestHandler):
         style   = req.get("style", "classic")
         if style not in ("classic", "modern"):
             style = "classic"
+        uppercase = bool(req.get("uppercase", True))
 
         # --- render ---
         try:
@@ -338,7 +617,7 @@ class _Handler(BaseHTTPRequestHandler):
             if source.width * source.height > _MAX_IMAGE_PIXELS:
                 self._json_error(413, "image dimensions too large")
                 return
-            spec = MemeSpec(style=style, top=top, bottom=bottom, caption=caption)
+            spec = MemeSpec(style=style, top=top, bottom=bottom, caption=caption, uppercase=uppercase)
             result = _render(source, spec)
             buf = io.BytesIO()
             result.save(buf, format="PNG")
