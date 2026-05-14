@@ -156,7 +156,7 @@ def _render_classic_block(
     w, h = img_size
     font_size = _block_font_size(h, spec, which)
     font = _font(spec.font_path, font_size)
-    stroke = max(1, int(font_size * spec.stroke_ratio))
+    stroke = 0 if spec.stroke_ratio == 0.0 else max(1, int(font_size * spec.stroke_ratio))
     max_width = int(w * (1.0 - 2 * spec.side_margin))
     xform = str.upper if spec.uppercase else (lambda s: s)
 
@@ -267,7 +267,7 @@ def classic_block_geometry(
     w, h = img_size
     font_size = _block_font_size(h, spec, which)
     font = _font(spec.font_path, font_size)
-    stroke = max(1, int(font_size * spec.stroke_ratio))
+    stroke = 0 if spec.stroke_ratio == 0.0 else max(1, int(font_size * spec.stroke_ratio))
     max_width = int(w * (1.0 - 2 * spec.side_margin))
     xform = str.upper if spec.uppercase else (lambda s: s)
 

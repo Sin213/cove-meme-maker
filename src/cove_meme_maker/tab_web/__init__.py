@@ -15,6 +15,8 @@ import base64
 import html
 import io
 import json
+import math
+import re
 import signal
 import socket
 import sys
@@ -433,12 +435,18 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        image_b64: b64,
-        style:     styleMode,
-        top:       topText.value,
-        bottom:    bottomText.value,
-        caption:   captionText.value,
-        uppercase: allCaps.checked,
+        image_b64:     b64,
+        style:         styleMode,
+        top:           topText.value,
+        bottom:        bottomText.value,
+        caption:       captionText.value,
+        uppercase:     allCaps.checked,
+        top_color:     topColor.value,
+        bottom_color:  bottomColor.value,
+        caption_color: captionColor.value,
+        font_scale:    parseInt(sizeSl.value, 10),
+        stroke_ratio:  parseInt(strokeSl.value, 10),
+        padding_scale: parseInt(padSl.value, 10),
       }),
     })
     .then(function (r) {
@@ -497,6 +505,31 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
 </body>
 </html>
 """
+
+
+_HEX_COLOR_RE = re.compile(r'^#[0-9A-Fa-f]{6}$')
+
+
+def _parse_hex_color(val: object, default: tuple) -> tuple:
+    """Parse a CSS #rrggbb string into an (r, g, b) int tuple.
+    Returns default for any invalid/missing input."""
+    if not isinstance(val, str) or not _HEX_COLOR_RE.match(val):
+        return default
+    return (int(val[1:3], 16), int(val[3:5], 16), int(val[5:7], 16))
+
+
+def _safe_pct(val: object, spec_default: float) -> float:
+    """Convert an integer-percent client value to a float fraction.
+    Returns spec_default when val is None, non-numeric, or non-finite."""
+    if val is None:
+        return spec_default
+    try:
+        v = float(val)
+        if not math.isfinite(v):
+            return spec_default
+        return v / 100.0
+    except (TypeError, ValueError):
+        return spec_default
 
 
 def _build_html(run_id: str) -> bytes:
@@ -608,6 +641,17 @@ class _Handler(BaseHTTPRequestHandler):
             style = "classic"
         uppercase = bool(req.get("uppercase", True))
 
+        # Colors — validated from #rrggbb; fall back to MemeSpec defaults on invalid input
+        top_color     = _parse_hex_color(req.get("top_color"),     (255, 255, 255))
+        bottom_color  = _parse_hex_color(req.get("bottom_color"),  (255, 255, 255))
+        caption_color = _parse_hex_color(req.get("caption_color"), (0, 0, 0))
+
+        # Numeric sliders — client sends integer percentage; server clamps to safe range.
+        # Absent field → MemeSpec dataclass default (0.085 / 0.08 / 0.22).
+        font_scale    = max(0.02, min(0.30, _safe_pct(req.get("font_scale"),    0.085)))
+        stroke_ratio  = max(0.00, min(0.20, _safe_pct(req.get("stroke_ratio"),  0.08)))
+        padding_scale = max(0.05, min(0.60, _safe_pct(req.get("padding_scale"), 0.22)))
+
         # --- render ---
         try:
             from PIL import Image
@@ -617,7 +661,19 @@ class _Handler(BaseHTTPRequestHandler):
             if source.width * source.height > _MAX_IMAGE_PIXELS:
                 self._json_error(413, "image dimensions too large")
                 return
-            spec = MemeSpec(style=style, top=top, bottom=bottom, caption=caption, uppercase=uppercase)
+            spec = MemeSpec(
+                style=style,
+                top=top,
+                bottom=bottom,
+                caption=caption,
+                uppercase=uppercase,
+                top_color=top_color,
+                bottom_color=bottom_color,
+                caption_color=caption_color,
+                font_scale=font_scale,
+                stroke_ratio=stroke_ratio,
+                padding_scale=padding_scale,
+            )
             result = _render(source, spec)
             buf = io.BytesIO()
             result.save(buf, format="PNG")
