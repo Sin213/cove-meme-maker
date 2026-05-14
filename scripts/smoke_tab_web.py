@@ -455,6 +455,134 @@ def main() -> None:
             f"/render valid top_pos + malformed bottom_pos: expected 400, got {s_mix}"
         print(f"  /render valid top_pos + malformed bottom_pos → 400 OK")
 
+        # -------------------------------------------------------
+        # /render with per-block size_pct and rotation payloads
+        # -------------------------------------------------------
+
+        # valid size_pct + rotation → 200 + PNG
+        status_sr, data_sr = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "style": "classic",
+            "top": "HELLO",
+            "bottom": "WORLD",
+            "top_size_pct": 15,
+            "bottom_size_pct": 10,
+            "top_rotation": 10,
+            "bottom_rotation": -10,
+        })
+        assert status_sr == 200, \
+            f"/render valid size+rotation: expected 200, got {status_sr}: {data_sr}"
+        assert "preview_b64" in data_sr, \
+            f"/render valid size+rotation: missing preview_b64: {data_sr}"
+        sr_png = base64.b64decode(data_sr["preview_b64"])
+        assert sr_png[:4] == b"\x89PNG", \
+            f"/render valid size+rotation: preview_b64 not a PNG"
+        print(f"  /render valid size_pct + rotation → 200 PNG OK")
+
+        # absent size_pct/rotation → 200 (renderer uses global defaults)
+        status_nosr, data_nosr = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "style": "classic",
+            "top": "HELLO",
+            "bottom": "WORLD",
+        })
+        assert status_nosr == 200, \
+            f"/render absent size+rotation: expected 200, got {status_nosr}: {data_nosr}"
+        print(f"  /render absent size_pct/rotation → 200 OK")
+
+        # null size_pct → 200 (server treats null as None → fall back to font_scale)
+        status_nullsz, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "style": "classic",
+            "top": "HELLO",
+            "top_size_pct": None,
+            "bottom_size_pct": None,
+            "top_rotation": 0,
+            "bottom_rotation": 0,
+        })
+        assert status_nullsz == 200, \
+            f"/render null size_pct: expected 200, got {status_nullsz}"
+        print(f"  /render null size_pct → 200 OK")
+
+        # out-of-range size_pct → 200 (server clamps, does not reject)
+        status_oorsz, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "style": "classic",
+            "top": "HELLO",
+            "top_size_pct": 500,
+            "bottom_size_pct": -5,
+        })
+        assert status_oorsz == 200, \
+            f"/render out-of-range size_pct: expected 200 (clamped), got {status_oorsz}"
+        print(f"  /render out-of-range size_pct → 200 (clamped)  OK")
+
+        # out-of-range rotation → 200 (server clamps, does not reject)
+        status_oorrot, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "style": "classic",
+            "top": "HELLO",
+            "top_rotation": 999,
+            "bottom_rotation": -999,
+        })
+        assert status_oorrot == 200, \
+            f"/render out-of-range rotation: expected 200 (clamped), got {status_oorrot}"
+        print(f"  /render out-of-range rotation → 200 (clamped)  OK")
+
+        # malformed: string top_size_pct → 400
+        s_szstr, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "top_size_pct": "large",
+        })
+        assert s_szstr == 400, \
+            f"/render top_size_pct='large' (string): expected 400, got {s_szstr}"
+        print(f"  /render top_size_pct='large' (string) → 400 OK")
+
+        # malformed: string top_rotation → 400
+        s_rotstr, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "top_rotation": "left",
+        })
+        assert s_rotstr == 400, \
+            f"/render top_rotation='left' (string): expected 400, got {s_rotstr}"
+        print(f"  /render top_rotation='left' (string) → 400 OK")
+
+        # malformed: array top_size_pct → 400
+        s_szarr, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "top_size_pct": [10, 20],
+        })
+        assert s_szarr == 400, \
+            f"/render top_size_pct=[10,20] (array): expected 400, got {s_szarr}"
+        print(f"  /render top_size_pct=[10,20] (array) → 400 OK")
+
+        # malformed: array top_rotation → 400
+        s_rotarr, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "top_rotation": [0, 45],
+        })
+        assert s_rotarr == 400, \
+            f"/render top_rotation=[0,45] (array): expected 400, got {s_rotarr}"
+        print(f"  /render top_rotation=[0,45] (array) → 400 OK")
+
+        # malformed: NaN top_size_pct → 400 (json.dumps serializes float('nan')
+        # as NaN; server's json.loads rejects the non-standard token)
+        s_sznan, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "top_size_pct": float("nan"),
+        })
+        assert s_sznan == 400, \
+            f"/render top_size_pct=NaN: expected 400, got {s_sznan}"
+        print(f"  /render top_size_pct=NaN → 400 OK")
+
+        # malformed: Infinity top_rotation → 400 (same mechanism as NaN)
+        s_rotinf, _ = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "top_rotation": float("inf"),
+        })
+        assert s_rotinf == 400, \
+            f"/render top_rotation=Infinity: expected 400, got {s_rotinf}"
+        print(f"  /render top_rotation=Infinity → 400 OK")
+
         # --- clean shutdown on socket close ---
         f.close()   # close file-object first to release the dup'd fd
         conn.close()

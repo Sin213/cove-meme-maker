@@ -48,6 +48,11 @@ _MAX_REQUEST_BODY = 20 * 1024 * 1024   # 20 MB — JSON body including base64 im
 _MAX_IMAGE_BYTES  = 10 * 1024 * 1024   # 10 MB — decoded image bytes
 _MAX_IMAGE_PIXELS = 4096 * 4096        # 16 MP — source image width × height
 
+_SIZE_PCT_MIN =  2.0    # smallest renderable per-block font size (% of image height)
+_SIZE_PCT_MAX = 30.0
+_ROTATION_MIN = -180.0  # clockwise degrees
+_ROTATION_MAX =  180.0
+
 # ---------------------------------------------------------------------------
 # Template registry
 # ---------------------------------------------------------------------------
@@ -257,6 +262,16 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
             <input type="color" id="top-color" value="#ffffff">
           </label>
         </div>
+        <div class="slider-row">
+          <span class="slider-lbl">Size</span>
+          <input type="range" class="slider" id="top-size-sl" min="0" max="30" value="0">
+          <span class="slider-val" id="top-size-val">Auto</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-lbl">Angle</span>
+          <input type="range" class="slider" id="top-rot-sl" min="-180" max="180" value="0">
+          <span class="slider-val" id="top-rot-val">0&#xb0;</span>
+        </div>
         <span class="field-label">Bottom text</span>
         <div class="field-row">
           <textarea class="field-ta" id="bottom-text" placeholder="BOTTOM TEXT"></textarea>
@@ -264,6 +279,16 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
             <span class="color-swatch" id="bottom-swatch"></span>
             <input type="color" id="bottom-color" value="#ffffff">
           </label>
+        </div>
+        <div class="slider-row">
+          <span class="slider-lbl">Size</span>
+          <input type="range" class="slider" id="bottom-size-sl" min="0" max="30" value="0">
+          <span class="slider-val" id="bottom-size-val">Auto</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-lbl">Angle</span>
+          <input type="range" class="slider" id="bottom-rot-sl" min="-180" max="180" value="0">
+          <span class="slider-val" id="bottom-rot-val">0&#xb0;</span>
         </div>
         <div class="check-row">
           <input type="checkbox" id="all-caps" checked>
@@ -359,6 +384,14 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   var galleryStrip = document.getElementById('gallery-strip');
   var topHandle    = document.getElementById('top-handle');
   var bottomHandle = document.getElementById('bottom-handle');
+  var topSizeSl     = document.getElementById('top-size-sl');
+  var bottomSizeSl  = document.getElementById('bottom-size-sl');
+  var topRotSl      = document.getElementById('top-rot-sl');
+  var bottomRotSl   = document.getElementById('bottom-rot-sl');
+  var topSizeVal    = document.getElementById('top-size-val');
+  var bottomSizeVal = document.getElementById('bottom-size-val');
+  var topRotVal     = document.getElementById('top-rot-val');
+  var bottomRotVal  = document.getElementById('bottom-rot-val');
 
   var styleMode    = 'classic';
   var currentDataUrl = null;
@@ -396,6 +429,13 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
     topPos    = null;
     bottomPos = null;
     _hideHandles();
+  }
+
+  function _resetSizeRot() {
+    topSizeSl.value    = '0'; topSizeVal.textContent    = 'Auto';    fillSlider(topSizeSl);
+    bottomSizeSl.value = '0'; bottomSizeVal.textContent = 'Auto';    fillSlider(bottomSizeSl);
+    topRotSl.value     = '0'; topRotVal.textContent     = '0\xb0'; fillSlider(topRotSl);
+    bottomRotSl.value  = '0'; bottomRotVal.textContent  = '0\xb0'; fillSlider(bottomRotSl);
   }
 
   function _onDragMove(clientX, clientY) {
@@ -467,6 +507,7 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
             previewImg.src = currentDataUrl;
             setStatus('Template loaded — press Render');
             _resetHandles();
+            _resetSizeRot();
             if (styleMode === 'classic') {
               var tok = myToken;
               requestAnimationFrame(function () { if (tok === renderToken) _showHandles(); });
@@ -543,7 +584,7 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
     sl.style.background =
       'linear-gradient(to right,#50e6cf ' + pct + '%,#1c1c28 ' + pct + '%)';
   }
-  [sizeSl, strokeSl, padSl].forEach(fillSlider);
+  [sizeSl, strokeSl, padSl, topSizeSl, bottomSizeSl, topRotSl, bottomRotSl].forEach(fillSlider);
 
   sizeSl.addEventListener('input', function () {
     sizeVal.textContent = sizeSl.value + '%'; fillSlider(sizeSl);
@@ -553,6 +594,22 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
   });
   padSl.addEventListener('input', function () {
     padVal.textContent = padSl.value + '%'; fillSlider(padSl);
+  });
+  topSizeSl.addEventListener('input', function () {
+    topSizeVal.textContent = topSizeSl.value === '0' ? 'Auto' : topSizeSl.value + '%';
+    fillSlider(topSizeSl);
+  });
+  bottomSizeSl.addEventListener('input', function () {
+    bottomSizeVal.textContent = bottomSizeSl.value === '0' ? 'Auto' : bottomSizeSl.value + '%';
+    fillSlider(bottomSizeSl);
+  });
+  topRotSl.addEventListener('input', function () {
+    topRotVal.textContent = topRotSl.value + '\xb0';
+    fillSlider(topRotSl);
+  });
+  bottomRotSl.addEventListener('input', function () {
+    bottomRotVal.textContent = bottomRotSl.value + '\xb0';
+    fillSlider(bottomRotSl);
   });
 
   function syncSwatch(inp, sw) { sw.style.background = inp.value; }
@@ -615,6 +672,7 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
         previewImg.src = currentDataUrl;
         setStatus('Image loaded — press Render');
         _resetHandles();
+        _resetSizeRot();
         if (styleMode === 'classic') {
           var tok = myLoadToken;
           requestAnimationFrame(function () { if (tok === renderToken) _showHandles(); });
@@ -652,6 +710,7 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
     renderToken++;
     _deselectTemplates();
     _resetHandles();
+    _resetSizeRot();
     currentDataUrl = null;
     lastPng = null;
     fileInput.value = '';
@@ -707,8 +766,12 @@ input[type="range"].slider::-moz-range-thumb{width:14px;height:14px;border-radiu
         font_scale:    parseInt(sizeSl.value, 10),
         stroke_ratio:  parseInt(strokeSl.value, 10),
         padding_scale: parseInt(padSl.value, 10),
-        top_pos:       topPos,
-        bottom_pos:    bottomPos,
+        top_pos:        topPos,
+        bottom_pos:     bottomPos,
+        top_size_pct:    topSizeSl.value === '0' ? null : parseInt(topSizeSl.value, 10),
+        bottom_size_pct: bottomSizeSl.value === '0' ? null : parseInt(bottomSizeSl.value, 10),
+        top_rotation:    parseInt(topRotSl.value, 10),
+        bottom_rotation: parseInt(bottomRotSl.value, 10),
       }),
     })
     .then(function (r) {
@@ -815,6 +878,39 @@ def _parse_pos(val: object) -> "tuple[float, float] | None":
     if not (math.isfinite(x) and math.isfinite(y)):
         raise ValueError("pos values must be finite")
     return (max(0.0, min(1.0, x)), max(0.0, min(1.0, y)))
+
+
+def _parse_size_pct(val: object) -> "float | None":
+    """Parse a per-block font size as a percentage of image height.
+    Returns None (fall back to global font_scale) when absent or 0.
+    Clamps valid finite values to [_SIZE_PCT_MIN, _SIZE_PCT_MAX].
+    Raises ValueError for present-but-malformed input."""
+    if val is None:
+        return None
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        raise ValueError("size_pct must be a number")
+    if not math.isfinite(v):
+        raise ValueError("size_pct must be finite")
+    if v == 0.0:
+        return None
+    return max(_SIZE_PCT_MIN, min(_SIZE_PCT_MAX, v))
+
+
+def _parse_rotation(val: object) -> float:
+    """Parse a clockwise rotation in degrees.
+    Returns 0.0 when absent. Clamps finite values to [_ROTATION_MIN, _ROTATION_MAX].
+    Raises ValueError for present-but-malformed input."""
+    if val is None:
+        return 0.0
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        raise ValueError("rotation must be a number")
+    if not math.isfinite(v):
+        raise ValueError("rotation must be finite")
+    return max(_ROTATION_MIN, min(_ROTATION_MAX, v))
 
 
 def _build_html(run_id: str) -> bytes:
@@ -982,6 +1078,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._json_error(400, f"invalid position: {exc}")
             return
 
+        # Per-block size and rotation — validated; absent/0 → renderer default.
+        try:
+            top_size_pct    = _parse_size_pct(req.get("top_size_pct"))
+            bottom_size_pct = _parse_size_pct(req.get("bottom_size_pct"))
+            top_rotation    = _parse_rotation(req.get("top_rotation"))
+            bottom_rotation = _parse_rotation(req.get("bottom_rotation"))
+        except ValueError as exc:
+            self._json_error(400, f"invalid size/rotation: {exc}")
+            return
+
         # --- render ---
         try:
             from PIL import Image
@@ -1005,6 +1111,10 @@ class _Handler(BaseHTTPRequestHandler):
                 padding_scale=padding_scale,
                 top_pos=top_pos,
                 bottom_pos=bottom_pos,
+                top_size_pct=top_size_pct,
+                bottom_size_pct=bottom_size_pct,
+                top_rotation=top_rotation,
+                bottom_rotation=bottom_rotation,
             )
             result = _render(source, spec)
             buf = io.BytesIO()
