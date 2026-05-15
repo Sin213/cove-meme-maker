@@ -6,14 +6,14 @@ and export.
 
 ![Cove Meme Maker v2.0.0](assets/screenshot.png)
 
-## Download (v2.1.0)
+## Download (v2.1.1)
 
 | Platform | File |
 | -------- | ---- |
-| Windows (installer) | `cove-meme-maker-2.1.0-Setup.exe` |
-| Windows (portable) | `cove-meme-maker-2.1.0-Portable.exe` |
-| Linux (AppImage) | `Cove-Meme-Maker-2.1.0-x86_64.AppImage` |
-| Linux (Debian / Ubuntu) | `cove-meme-maker_2.1.0_amd64.deb` |
+| Windows (installer) | `cove-meme-maker-2.1.1-Setup.exe` |
+| Windows (portable) | `cove-meme-maker-2.1.1-Portable.exe` |
+| Linux (AppImage) | `Cove-Meme-Maker-2.1.1-x86_64.AppImage` |
+| Linux (Debian / Ubuntu) | `cove-meme-maker_2.1.1_amd64.deb` |
 
 Grab the artifacts from the [Releases page](https://github.com/Sin213/cove-meme-maker/releases).
 
@@ -83,7 +83,7 @@ PYTHONPATH=src python -m cove_meme_maker
 ### Linux (AppImage + .deb)
 
 ```bash
-VERSION=2.1.0 ./scripts/build-release.sh
+VERSION=2.1.1 ./scripts/build-release.sh
 ```
 
 Produces `Cove-Meme-Maker-<version>-x86_64.AppImage` and
@@ -92,7 +92,7 @@ Produces `Cove-Meme-Maker-<version>-x86_64.AppImage` and
 ### Windows (Setup.exe + Portable.exe)
 
 ```powershell
-.\build.ps1 -Version 2.1.0
+.\build.ps1 -Version 2.1.1
 ```
 
 Requires Python 3.12+ and [Inno Setup 6](https://jrsoftware.org/isdl.php).

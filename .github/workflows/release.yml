@@ -74,13 +74,24 @@ jobs:
           path: release/*.deb
           if-no-files-found: error
 
+      - name: Generate SHA256 sidecars
+        run: |
+          cd release
+          for f in *.AppImage *.deb; do
+            [ -e "$f" ] || continue
+            sha256sum "$f" > "$f.sha256"
+          done
+          ls -lh
+
       - name: Attach to GitHub Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           files: |
             release/*.AppImage
+            release/*.AppImage.sha256
             release/*.deb
+            release/*.deb.sha256
           body_path: .github/RELEASE_NOTES_v${{ needs.resolve-version.outputs.version }}.md
           fail_on_unmatched_files: true
 
@@ -115,12 +126,25 @@ jobs:
           path: release/*-Portable.exe
           if-no-files-found: error
 
+      - name: Generate SHA256 sidecars
+        shell: pwsh
+        run: |
+          Set-Location release
+          Get-ChildItem -File -Include *-Setup.exe,*-Portable.exe | ForEach-Object {
+              $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
+              "$hash  $($_.Name)" | Out-File -FilePath "$($_.Name).sha256" -Encoding ascii -NoNewline
+              Add-Content -Path "$($_.Name).sha256" -Value ""
+          }
+          Get-ChildItem | Format-Table Name, Length
+
       - name: Attach to GitHub Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           files: |
             release/*-Setup.exe
+            release/*-Setup.exe.sha256
             release/*-Portable.exe
+            release/*-Portable.exe.sha256
           body_path: .github/RELEASE_NOTES_v${{ needs.resolve-version.outputs.version }}.md
           fail_on_unmatched_files: true
