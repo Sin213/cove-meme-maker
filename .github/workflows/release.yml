@@ -130,10 +130,12 @@ jobs:
         shell: pwsh
         run: |
           Set-Location release
-          Get-ChildItem -File -Include *-Setup.exe,*-Portable.exe | ForEach-Object {
-              $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
-              "$hash  $($_.Name)" | Out-File -FilePath "$($_.Name).sha256" -Encoding ascii -NoNewline
-              Add-Content -Path "$($_.Name).sha256" -Value ""
+          $files = @(Get-ChildItem -File | Where-Object { $_.Name -like '*-Setup.exe' -or $_.Name -like '*-Portable.exe' })
+          if ($files.Count -eq 0) { throw "No Setup.exe or Portable.exe found in release/" }
+          foreach ($f in $files) {
+              $hash = (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLower()
+              $line = "$hash  $($f.Name)`n"
+              [System.IO.File]::WriteAllText("$($f.FullName).sha256", $line, [System.Text.Encoding]::ASCII)
           }
           Get-ChildItem | Format-Table Name, Length
 
