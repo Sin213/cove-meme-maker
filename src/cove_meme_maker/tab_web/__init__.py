@@ -247,7 +247,6 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
 .modern-band{position:absolute;background:#ffffff;display:none;align-items:center;justify-content:center;overflow:hidden;pointer-events:none;box-sizing:border-box;border-radius:4px 4px 0 0;box-shadow:0 -2px 32px rgba(0,0,0,0.30),0 0 0 1px rgba(255,255,255,0.04)}
 .modern-band.active{display:flex}
 .modern-band-text{font-family:"DejaVu Sans","Liberation Sans","Noto Sans",Arial,sans-serif;color:#000;font-weight:700;text-align:center;white-space:pre-line;line-height:1.18;width:100%;padding:0 4%;word-break:break-word;margin:0;-webkit-font-smoothing:antialiased}
-.modern-band-text.placeholder{color:rgba(0,0,0,0.30);font-weight:500;font-style:italic}
 #preview-wrap.modern-mode #preview-img{border-radius:0 0 4px 4px}
 </style>
 </head>
@@ -575,11 +574,11 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   // PIL-baked PNG already contains a real band).
   function _clearModernLayout() {
     modernBand.classList.remove('active');
-    modernBandText.classList.remove('placeholder');
     modernBandText.textContent = '';
     previewWrap.classList.remove('modern-mode');
     previewImg.style.maxHeight = '';
     previewImg.style.transform = '';
+    if (cropActive) _updateCropOverlay();
   }
 
   // Approximation of PIL _render_modern: paints a white caption band above
@@ -590,6 +589,8 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   function _layoutModernBand() {
     if (!currentDataUrl) { _clearModernLayout(); return; }
     if (showingRenderedPng) { _clearModernLayout(); return; }
+    var rawCaption = (captionText.value || '').trim();
+    if (!rawCaption.length) { _clearModernLayout(); return; }
 
     // Mirror server clamps: padding_scale [0.05, 0.60], font_scale [0.02, 0.30].
     var padPct  = parseFloat(padSl.value);
@@ -610,7 +611,8 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     previewImg.style.transform = '';
 
     requestAnimationFrame(function () {
-      if (styleMode !== 'modern' || !currentDataUrl || showingRenderedPng) {
+      if (styleMode !== 'modern' || !currentDataUrl || showingRenderedPng
+          || !(captionText.value || '').trim().length) {
         _clearModernLayout();
         return;
       }
@@ -631,19 +633,10 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       modernBand.style.height = bandH + 'px';
       modernBand.classList.add('active');
 
-      var raw = captionText.value || '';
-      if (raw.trim().length) {
-        // textContent — never innerHTML — so user input cannot inject markup
-        // or scripts into the page.
-        modernBandText.textContent = raw;
-        modernBandText.classList.remove('placeholder');
-        modernBandText.style.color = captionColor.value;
-      } else {
-        modernBandText.textContent = '(caption)';
-        modernBandText.classList.add('placeholder');
-        // Clear inline color so the .placeholder CSS rule (muted grey) wins.
-        modernBandText.style.color = '';
-      }
+      // textContent — never innerHTML — so user input cannot inject markup
+      // or scripts into the page.
+      modernBandText.textContent = captionText.value || '';
+      modernBandText.style.color = captionColor.value;
       modernBandText.style.fontSize = (imgRect.height * fsPct / 100) + 'px';
 
       // After Modern layout finalises the image's maxHeight + translateY,
@@ -1345,7 +1338,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
         if (!b64) {
           // doRender returned null: either a newer render started or the
           // editor was edited mid-flight. Cache state is left untouched —
-          // the next click will render against the user's latest state.
+          // the next Export/Copy renders against the user's latest state.
           setStatus('Newer edits — try Export again', '#ffb454');
           return;
         }
