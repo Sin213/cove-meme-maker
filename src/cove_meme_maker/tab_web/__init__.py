@@ -234,17 +234,12 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
 #copy-btn:hover:not(:disabled){color:#ececf1;background:#161620;border-color:rgba(255,255,255,0.10)}
 #copy-btn:disabled{color:#6b6b80;cursor:default}
 
-/* Template gallery */
-#gallery-strip{display:flex;gap:8px;overflow-x:auto;padding:0 12px 12px;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,0.08) transparent}
-#gallery-strip::-webkit-scrollbar{height:4px}
-#gallery-strip::-webkit-scrollbar-track{background:transparent}
-#gallery-strip::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.08);border-radius:2px}
-.tmpl-card{flex-shrink:0;width:72px;cursor:pointer;border-radius:7px;border:2px solid transparent;overflow:hidden;background:#11111a;transition:border-color 0.12s}
-.tmpl-card:hover{border-color:rgba(255,255,255,0.16)}
-.tmpl-card.selected{border-color:#50e6cf}
-.tmpl-card img{display:block;width:72px;height:48px;object-fit:cover}
-.tmpl-name{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:10px;color:#9a9aae;text-align:center;padding:4px 4px 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#gallery-empty{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:11px;color:#6b6b80;padding:0 16px 12px}
+/* Live text overlays — render top/bottom/caption text directly on the canvas
+   without requiring a /render round-trip. Coordinates and sizing approximate
+   the PIL renderer; exact font metrics may differ between system bold faces. */
+.text-layer{position:absolute;pointer-events:none;user-select:none;white-space:pre-line;text-align:center;line-height:1.05;transform-origin:center center;word-break:break-word;-webkit-font-smoothing:antialiased;display:none;letter-spacing:0;padding:0;margin:0}
+.text-layer.classic{font-weight:900}
+.text-layer.caption{font-weight:600;line-height:1.18}
 </style>
 </head>
 <body>
@@ -271,6 +266,9 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       </div>
       <div id="preview-wrap">
         <img id="preview-img" alt="">
+        <div id="top-text-layer" class="text-layer classic"></div>
+        <div id="bottom-text-layer" class="text-layer classic"></div>
+        <div id="caption-text-layer" class="text-layer caption"></div>
         <div id="handle-layer">
           <div id="top-handle" class="drag-handle hidden">T</div>
           <div id="bottom-handle" class="drag-handle hidden">B</div>
@@ -302,10 +300,6 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   <div id="inspector">
     <div id="inspector-body">
 
-      <span class="sec-label">Templates</span>
-      <div id="gallery-strip"></div>
-
-      <div class="sec-divider"></div>
       <span class="sec-label">Style</span>
       <div id="seg-frame">
         <button class="seg-btn active" id="btn-classic">Classic</button>
@@ -473,7 +467,9 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   var padVal      = document.getElementById('pad-val');
   var exportBtn    = document.getElementById('export-btn');
   var copyBtn      = document.getElementById('copy-btn');
-  var galleryStrip = document.getElementById('gallery-strip');
+  var topTextLayer    = document.getElementById('top-text-layer');
+  var bottomTextLayer = document.getElementById('bottom-text-layer');
+  var captionTextLayer= document.getElementById('caption-text-layer');
   var topHandle    = document.getElementById('top-handle');
   var bottomHandle = document.getElementById('bottom-handle');
   var topResizeHandle    = document.getElementById('top-resize-handle');
@@ -521,6 +517,146 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     statusPulse.style.background = pulse || '#3ddc97';
   }
 
+  // Live text overlays — show top/bottom/caption directly on the canvas as
+  // inputs change so users do not have to press Render to see size, position,
+  // rotation, colour, stroke, all-caps, or font choice. Font parity is
+  // approximate (browser falls back through the system font chain below;
+  // Pillow uses bundled DejaVu Bold TrueType faces). Export/Copy still call
+  // /render so the final PNG matches the standalone editor.
+  var FONT_FAMILIES = {
+    'default': '"DejaVu Sans","Liberation Sans","Noto Sans","Arial Black",Impact,sans-serif',
+    'sans':    '"DejaVu Sans","Liberation Sans","Noto Sans","Arial Black",Impact,sans-serif',
+    'serif':   '"DejaVu Serif","Liberation Serif","Noto Serif","Times New Roman",serif',
+    'mono':    '"DejaVu Sans Mono","Liberation Mono","Noto Mono",Menlo,Consolas,monospace'
+  };
+
+  // True whenever the live editor state has diverged from lastPng; Export
+  // and Copy consult this flag to decide whether to reuse lastPng or call
+  // /render on demand.
+  var hasUnrenderedChanges = true;
+
+  // Monotonic counter incremented by _markDirty() on every visible state
+  // change. doRender() captures the value at request start and only commits
+  // its result (lastPng / hasUnrenderedChanges) if the counter is unchanged
+  // when the response arrives. A stale render can therefore never overwrite
+  // newer edits or trick Export/Copy into shipping an out-of-date PNG.
+  var editorVersion = 0;
+
+  // True only while previewImg is actually displaying lastPng (the PIL
+  // rendered output). updateLiveText() uses this — not the cache-cleanliness
+  // flag — to decide whether to hide overlays. Export/Copy run /render on
+  // demand without ever flipping this, so live overlays stay visible after
+  // resize even on a clean cache. _markDirty() flips it back to false when
+  // it restores the source image.
+  var showingRenderedPng = false;
+
+  function _hideAllTextLayers() {
+    topTextLayer.style.display = 'none';
+    bottomTextLayer.style.display = 'none';
+    captionTextLayer.style.display = 'none';
+  }
+
+  function _styleTextLayer(which, layer) {
+    if (!currentDataUrl) { layer.style.display = 'none'; return; }
+    var imgRect  = previewImg.getBoundingClientRect();
+    var wrapRect = previewWrap.getBoundingClientRect();
+    if (imgRect.width < 1 || imgRect.height < 1) {
+      layer.style.display = 'none';
+      return;
+    }
+    var raw;
+    if      (which === 'top')    raw = topText.value;
+    else if (which === 'bottom') raw = bottomText.value;
+    else                         raw = captionText.value;
+    if (which !== 'caption' && allCaps.checked) raw = raw.toUpperCase();
+    if (!raw || !raw.trim()) { layer.style.display = 'none'; return; }
+    // Assign via textContent — never innerHTML — so user input cannot inject
+    // markup or scripts into the page.
+    layer.textContent = raw;
+    layer.style.display = 'block';
+
+    var globalPct = parseFloat(sizeSl.value);
+    var pct;
+    if (which === 'caption') {
+      pct = globalPct;
+    } else {
+      var blockSl = which === 'top' ? topSizeSl : bottomSizeSl;
+      var blockVal = parseInt(blockSl.value, 10);
+      pct = blockVal > 0 ? blockVal : globalPct;
+    }
+    // Server clamps per-block size to [2, 30]; mirror that in the live preview.
+    pct = Math.max(2.0, Math.min(30.0, pct));
+    var fontSizePx = imgRect.height * pct / 100;
+    layer.style.fontSize = fontSizePx + 'px';
+
+    if (which === 'caption') {
+      layer.style.fontFamily = FONT_FAMILIES['default'];
+      layer.style.color = captionColor.value;
+      layer.style.webkitTextStroke = '0';
+    } else {
+      var fontId = which === 'top' ? topFontSel.value : bottomFontSel.value;
+      layer.style.fontFamily = FONT_FAMILIES[fontId] || FONT_FAMILIES['default'];
+      layer.style.color = which === 'top' ? topColor.value : bottomColor.value;
+      var strokePct = parseFloat(strokeSl.value);
+      var strokePx = strokePct > 0 ? Math.max(1, fontSizePx * strokePct / 100) : 0;
+      layer.style.webkitTextStroke = strokePx > 0 ? (strokePx + 'px #000') : '0';
+    }
+    // Approximate renderer side_margin (0.04 default).
+    layer.style.maxWidth = (imgRect.width * 0.92) + 'px';
+
+    var pos;
+    if      (which === 'top')    pos = topPos    || [0.5, 0.10];
+    else if (which === 'bottom') pos = bottomPos || [0.5, 0.90];
+    else                         pos = [0.5, 0.10];
+    var cx = (imgRect.left - wrapRect.left) + pos[0] * imgRect.width;
+    var cy = (imgRect.top  - wrapRect.top ) + pos[1] * imgRect.height;
+    layer.style.left = cx + 'px';
+    layer.style.top  = cy + 'px';
+
+    var rot = 0;
+    if (which === 'top')    rot = parseFloat(topRotSl.value);
+    if (which === 'bottom') rot = parseFloat(bottomRotSl.value);
+    layer.style.transform = 'translate(-50%, -50%) rotate(' + rot + 'deg)';
+  }
+
+  function updateLiveText() {
+    // Hide overlays only when previewImg is actually showing the PIL render
+    // (otherwise they would visually duplicate the burned-in text). Cache
+    // cleanliness alone is NOT a signal to hide overlays: Export/Copy run
+    // /render on demand and clear hasUnrenderedChanges while previewImg is
+    // still showing the source image — overlays must remain visible there.
+    if (showingRenderedPng) {
+      _hideAllTextLayers();
+      return;
+    }
+    if (styleMode === 'classic') {
+      _styleTextLayer('top',    topTextLayer);
+      _styleTextLayer('bottom', bottomTextLayer);
+      captionTextLayer.style.display = 'none';
+    } else {
+      topTextLayer.style.display = 'none';
+      bottomTextLayer.style.display = 'none';
+      _styleTextLayer('caption', captionTextLayer);
+    }
+  }
+
+  // Mark the current editor state dirty relative to lastPng.
+  // editorVersion++ invalidates any in-flight render: when its response
+  // arrives doRender() compares the captured version to the current one and
+  // refuses to commit lastPng or clear hasUnrenderedChanges on a mismatch.
+  // If the preview surface was showing the rendered PNG, restore the source
+  // image so the live overlays paint against the original geometry the next
+  // render will see.
+  function _markDirty() {
+    editorVersion++;
+    hasUnrenderedChanges = true;
+    if (showingRenderedPng) {
+      if (currentDataUrl) previewImg.src = currentDataUrl;
+      showingRenderedPng = false;
+    }
+    updateLiveText();
+  }
+
   function _placeHandle(handle, nx, ny) {
     var imgRect  = previewImg.getBoundingClientRect();
     var wrapRect = previewWrap.getBoundingClientRect();
@@ -554,6 +690,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     topRotateHandle.classList.remove('hidden');
     bottomResizeHandle.classList.remove('hidden');
     bottomRotateHandle.classList.remove('hidden');
+    updateLiveText();
   }
 
   function _hideHandles() {
@@ -569,6 +706,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     topPos    = null;
     bottomPos = null;
     _hideHandles();
+    _hideAllTextLayers();
   }
 
   function _resetSizeRot() {
@@ -687,16 +825,18 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       cropResetBtn.disabled = true;
       cropReadout.style.display = 'none';
     }
+    _markDirty();
   });
 
   cropResetBtn.addEventListener('click', function () {
     cropRect = { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
     _applyAspectConstraint(cropRect, 'br');
     _updateCropOverlay();
+    _markDirty();
   });
 
   aspectSel.addEventListener('change', function () {
-    if (cropActive) { _applyAspectConstraint(cropRect, 'br'); _updateCropOverlay(); }
+    if (cropActive) { _applyAspectConstraint(cropRect, 'br'); _updateCropOverlay(); _markDirty(); }
   });
 
   (function () {
@@ -741,6 +881,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       }
       _applyAspectConstraint(r, cropDragging);
       _updateCropOverlay();
+      _markDirty();
     }
     window.addEventListener('mousemove', function (e) { if (cropDragging) _onCropMove(e.clientX, e.clientY); });
     window.addEventListener('mouseup',   function ()  { cropDragging = null; });
@@ -764,6 +905,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       _placeHandle(bottomHandle, nx, ny);
       _placeSubHandles('bottom', nx, ny);
     }
+    _markDirty();
   }
 
   topHandle.addEventListener('mousedown', function (e) { e.preventDefault(); dragging = 'top'; });
@@ -796,6 +938,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       vd.textContent = newVal + '°';
       fillSlider(sl);
     }
+    _markDirty();
   }
 
   function _subHandleDown(e, which, type) {
@@ -836,122 +979,8 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       _placeSubHandles('bottom', bnx, bny);
     }
     if (cropActive) _updateCropOverlay();
+    updateLiveText();
   });
-
-  function _deselectTemplates() {
-    var cards = galleryStrip.querySelectorAll('.tmpl-card.selected');
-    for (var i = 0; i < cards.length; i++) { cards[i].classList.remove('selected'); }
-  }
-
-  function loadTemplate(id, name) {
-    var myToken = ++renderToken;
-    currentDataUrl = null;
-    lastPng = null;
-    renderBtn.disabled = true;
-    exportBtn.disabled = true;
-    copyBtn.disabled   = true;
-    fileNameEl.textContent = name;
-    fileMetaEl.textContent = '';
-    setStatus('Loading template…', '#ffb454');
-
-    fetch('/templates/' + encodeURIComponent(id))
-      .then(function (r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.blob();
-      })
-      .then(function (blob) {
-        if (myToken !== renderToken) return;
-        var reader = new FileReader();
-        reader.onload = function (e) {
-          if (myToken !== renderToken) return;
-          currentDataUrl = e.target.result;
-          var img = new Image();
-          img.onload = function () {
-            if (myToken !== renderToken) return;
-            fileMetaEl.textContent = img.naturalWidth + ' \xd7 ' + img.naturalHeight;
-            srcNaturalWidth  = img.naturalWidth || null;
-            srcNaturalHeight = img.naturalHeight || null;
-            srcNaturalAspect = img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : null;
-            renderBtn.disabled = false;
-            clearBtn.disabled  = false;
-            dropZone.style.display    = 'none';
-            previewWrap.style.display = 'flex';
-            previewImg.src = currentDataUrl;
-            setStatus('Template loaded — press Render');
-            _resetHandles();
-            _resetSizeRot();
-            _resetCrop();
-            cropToggleBtn.disabled = false;
-            if (styleMode === 'classic') {
-              var tok = myToken;
-              requestAnimationFrame(function () { if (tok === renderToken) _showHandles(); });
-            }
-          };
-          img.onerror = function () {
-            if (myToken !== renderToken) return;
-            currentDataUrl = null;
-            fileMetaEl.textContent = '';
-            previewWrap.style.display = 'none';
-            previewImg.src = '';
-            dropZone.style.display = '';
-            _deselectTemplates();
-            setStatus('Template image failed to load', '#ff6b6b');
-          };
-          img.src = e.target.result;
-        };
-        reader.onerror = function () {
-          if (myToken !== renderToken) return;
-          currentDataUrl = null;
-          fileMetaEl.textContent = '';
-          previewWrap.style.display = 'none';
-          previewImg.src = '';
-          dropZone.style.display = '';
-          _deselectTemplates();
-          setStatus('Template read failed', '#ff6b6b');
-        };
-        reader.readAsDataURL(blob);
-      })
-      .catch(function (err) {
-        if (myToken !== renderToken) return;
-        _deselectTemplates();
-        setStatus('Template error: ' + err.message, '#ff6b6b');
-      });
-  }
-
-  function buildGallery(templates) {
-    if (!templates || !templates.length) {
-      var empty = document.createElement('div');
-      empty.id = 'gallery-empty';
-      empty.textContent = 'Drop images into the templates folder to add templates.';
-      galleryStrip.replaceWith(empty);
-      return;
-    }
-    for (var i = 0; i < templates.length; i++) {
-      (function (t) {
-        var card = document.createElement('div');
-        card.className = 'tmpl-card';
-
-        var img = document.createElement('img');
-        img.src = '/templates/' + encodeURIComponent(t.id);
-        img.alt = '';
-        img.loading = 'lazy';
-
-        var nameEl = document.createElement('div');
-        nameEl.className = 'tmpl-name';
-        nameEl.textContent = t.name;
-
-        card.appendChild(img);
-        card.appendChild(nameEl);
-        card.addEventListener('click', function () {
-          _deselectTemplates();
-          card.classList.add('selected');
-          fileInput.value = '';
-          loadTemplate(t.id, t.name);
-        });
-        galleryStrip.appendChild(card);
-      })(templates[i]);
-    }
-  }
 
   function fillSlider(sl) {
     var pct = ((sl.value - sl.min) / (sl.max - sl.min)) * 100;
@@ -961,38 +990,47 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   [sizeSl, strokeSl, padSl, topSizeSl, bottomSizeSl, topRotSl, bottomRotSl].forEach(fillSlider);
 
   sizeSl.addEventListener('input', function () {
-    sizeVal.textContent = sizeSl.value + '%'; fillSlider(sizeSl);
+    sizeVal.textContent = sizeSl.value + '%'; fillSlider(sizeSl); _markDirty();
   });
   strokeSl.addEventListener('input', function () {
-    strokeVal.textContent = strokeSl.value + '%'; fillSlider(strokeSl);
+    strokeVal.textContent = strokeSl.value + '%'; fillSlider(strokeSl); _markDirty();
   });
   padSl.addEventListener('input', function () {
-    padVal.textContent = padSl.value + '%'; fillSlider(padSl);
+    padVal.textContent = padSl.value + '%'; fillSlider(padSl); _markDirty();
   });
   topSizeSl.addEventListener('input', function () {
     topSizeVal.textContent = topSizeSl.value === '0' ? 'Auto' : topSizeSl.value + '%';
-    fillSlider(topSizeSl);
+    fillSlider(topSizeSl); _markDirty();
   });
   bottomSizeSl.addEventListener('input', function () {
     bottomSizeVal.textContent = bottomSizeSl.value === '0' ? 'Auto' : bottomSizeSl.value + '%';
-    fillSlider(bottomSizeSl);
+    fillSlider(bottomSizeSl); _markDirty();
   });
   topRotSl.addEventListener('input', function () {
     topRotVal.textContent = topRotSl.value + '\xb0';
-    fillSlider(topRotSl);
+    fillSlider(topRotSl); _markDirty();
   });
   bottomRotSl.addEventListener('input', function () {
     bottomRotVal.textContent = bottomRotSl.value + '\xb0';
-    fillSlider(bottomRotSl);
+    fillSlider(bottomRotSl); _markDirty();
   });
+
+  // Text inputs, all-caps toggle, font selectors — each makes the live
+  // overlay stale and (for text/all-caps/fonts) repaints classic layers.
+  topText.addEventListener('input', _markDirty);
+  bottomText.addEventListener('input', _markDirty);
+  captionText.addEventListener('input', _markDirty);
+  allCaps.addEventListener('change', _markDirty);
+  topFontSel.addEventListener('change', _markDirty);
+  bottomFontSel.addEventListener('change', _markDirty);
 
   function syncSwatch(inp, sw) { sw.style.background = inp.value; }
   syncSwatch(topColor, topSwatch);
   syncSwatch(bottomColor, bottomSwatch);
   syncSwatch(captionColor, captionSwatch);
-  topColor.addEventListener('input', function () { syncSwatch(topColor, topSwatch); });
-  bottomColor.addEventListener('input', function () { syncSwatch(bottomColor, bottomSwatch); });
-  captionColor.addEventListener('input', function () { syncSwatch(captionColor, captionSwatch); });
+  topColor.addEventListener('input', function () { syncSwatch(topColor, topSwatch); _markDirty(); });
+  bottomColor.addEventListener('input', function () { syncSwatch(bottomColor, bottomSwatch); _markDirty(); });
+  captionColor.addEventListener('input', function () { syncSwatch(captionColor, captionSwatch); _markDirty(); });
 
   function setStyle(mode) {
     styleMode = mode;
@@ -1001,16 +1039,9 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     classicSec.style.display = mode === 'classic' ? '' : 'none';
     modernSec.style.display  = mode === 'modern'  ? '' : 'none';
     if (currentDataUrl) {
+      _markDirty();
       if (mode === 'classic') {
-        if (previewImg.src !== currentDataUrl) {
-          lastPng = null;
-          exportBtn.disabled = true;
-          copyBtn.disabled   = true;
-          previewImg.src = currentDataUrl;
-          requestAnimationFrame(function () { if (styleMode === 'classic') _showHandles(); });
-        } else {
-          _showHandles();
-        }
+        requestAnimationFrame(function () { if (styleMode === 'classic') _showHandles(); });
       } else {
         _hideHandles();
       }
@@ -1021,10 +1052,10 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
 
   function loadFile(file) {
     if (!file) return;
-    _deselectTemplates();
     var myLoadToken = ++renderToken;
     currentDataUrl = null;
     lastPng = null;
+    hasUnrenderedChanges = true;
     renderBtn.disabled = true;
     exportBtn.disabled = true;
     copyBtn.disabled   = true;
@@ -1044,17 +1075,22 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
         srcNaturalAspect = img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : null;
         renderBtn.disabled = false;
         clearBtn.disabled  = false;
+        exportBtn.disabled = false;
+        copyBtn.disabled   = false;
         dropZone.style.display    = 'none';
         previewWrap.style.display = 'flex';
         previewImg.src = currentDataUrl;
-        setStatus('Image loaded — press Render');
+        showingRenderedPng = false;
+        setStatus('Image loaded');
         _resetHandles();
         _resetSizeRot();
         _resetCrop();
         cropToggleBtn.disabled = false;
+        var tok = myLoadToken;
         if (styleMode === 'classic') {
-          var tok = myLoadToken;
           requestAnimationFrame(function () { if (tok === renderToken) _showHandles(); });
+        } else {
+          requestAnimationFrame(function () { if (tok === renderToken) updateLiveText(); });
         }
       };
       img.onerror = function () {
@@ -1087,12 +1123,12 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
 
   clearBtn.addEventListener('click', function () {
     renderToken++;
-    _deselectTemplates();
     _resetHandles();
     _resetSizeRot();
     _resetCrop();
     currentDataUrl = null;
     lastPng = null;
+    hasUnrenderedChanges = true;
     fileInput.value = '';
     fileNameEl.textContent = 'No file';
     fileMetaEl.textContent = '';
@@ -1102,6 +1138,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     copyBtn.disabled   = true;
     previewWrap.style.display = 'none';
     previewImg.src = '';
+    showingRenderedPng = false;
     dropZone.style.display = '';
     setStatus('Ready');
   });
@@ -1122,114 +1159,188 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     if (f) loadFile(f);
   });
 
-  renderBtn.addEventListener('click', function () {
-    if (!currentDataUrl) return;
-    var myToken = ++renderToken;
+  // Build a /render request body from the current editor state. Same payload
+  // shape as before — every server-side validation and clamp still applies.
+  function _buildRenderPayload() {
     var b64 = currentDataUrl.split(',')[1];
-    setStatus('Rendering…', '#ffb454');
-    renderBtn.disabled = true;
-    exportBtn.disabled = true;
-    copyBtn.disabled   = true;
-    // When crop is active, convert source-normalised handle positions into
-    // crop-local coordinates (the renderer applies crop before placing text).
-    // Does not mutate the stored drag state; null handles pass through as null.
     function _toCropLocal(pos) {
       if (!pos) return null;
       var lx = Math.max(0, Math.min(1, (pos[0] - cropRect.x) / cropRect.width));
       var ly = Math.max(0, Math.min(1, (pos[1] - cropRect.y) / cropRect.height));
       return [lx, ly];
     }
-    fetch('/render', {
+    return {
+      image_b64:     b64,
+      style:         styleMode,
+      top:           topText.value,
+      bottom:        bottomText.value,
+      caption:       captionText.value,
+      uppercase:     allCaps.checked,
+      top_color:     topColor.value,
+      bottom_color:  bottomColor.value,
+      caption_color: captionColor.value,
+      font_scale:    parseInt(sizeSl.value, 10),
+      stroke_ratio:  parseInt(strokeSl.value, 10),
+      padding_scale: parseInt(padSl.value, 10),
+      top_pos:        cropActive ? _toCropLocal(topPos)    : topPos,
+      bottom_pos:     cropActive ? _toCropLocal(bottomPos) : bottomPos,
+      top_size_pct:    topSizeSl.value === '0' ? null : parseInt(topSizeSl.value, 10),
+      bottom_size_pct: bottomSizeSl.value === '0' ? null : parseInt(bottomSizeSl.value, 10),
+      top_rotation:    parseInt(topRotSl.value, 10),
+      bottom_rotation: parseInt(bottomRotSl.value, 10),
+      top_font:        topFontSel.value,
+      bottom_font:     bottomFontSel.value,
+      crop: cropActive ? { x: cropRect.x, y: cropRect.y, width: cropRect.width, height: cropRect.height } : null,
+    };
+  }
+
+  // doRender resolves with the rendered PNG base64, or null when the result
+  // is stale and must not be applied. Two independent guards drop a result:
+  //
+  //   * renderToken mismatch — a newer doRender() has started after this one,
+  //     so its (presumably fresher) result is the authoritative one.
+  //   * editorVersion mismatch — _markDirty() ran while this request was in
+  //     flight, so the response no longer matches the visible editor state.
+  //     Do NOT touch lastPng or hasUnrenderedChanges in that case; the caller
+  //     surfaces a status and the user can re-trigger the action.
+  function doRender() {
+    if (!currentDataUrl) return Promise.reject(new Error('no image loaded'));
+    var myToken   = ++renderToken;
+    var myVersion = editorVersion;
+    setStatus('Rendering…', '#ffb454');
+    return fetch('/render', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        image_b64:     b64,
-        style:         styleMode,
-        top:           topText.value,
-        bottom:        bottomText.value,
-        caption:       captionText.value,
-        uppercase:     allCaps.checked,
-        top_color:     topColor.value,
-        bottom_color:  bottomColor.value,
-        caption_color: captionColor.value,
-        font_scale:    parseInt(sizeSl.value, 10),
-        stroke_ratio:  parseInt(strokeSl.value, 10),
-        padding_scale: parseInt(padSl.value, 10),
-        top_pos:        cropActive ? _toCropLocal(topPos)    : topPos,
-        bottom_pos:     cropActive ? _toCropLocal(bottomPos) : bottomPos,
-        top_size_pct:    topSizeSl.value === '0' ? null : parseInt(topSizeSl.value, 10),
-        bottom_size_pct: bottomSizeSl.value === '0' ? null : parseInt(bottomSizeSl.value, 10),
-        top_rotation:    parseInt(topRotSl.value, 10),
-        bottom_rotation: parseInt(bottomRotSl.value, 10),
-        top_font:        topFontSel.value,
-        bottom_font:     bottomFontSel.value,
-        crop: cropActive ? { x: cropRect.x, y: cropRect.y, width: cropRect.width, height: cropRect.height } : null,
-      }),
+      body: JSON.stringify(_buildRenderPayload()),
     })
-    .then(function (r) {
-      if (!r.ok) {
-        return r.json().then(function (d) {
-          throw new Error(d.error || ('HTTP ' + r.status));
-        });
-      }
-      return r.json();
-    })
-    .then(function (data) {
-      if (myToken !== renderToken) return;
-      lastPng = data.preview_b64;
-      // When crop is active keep the source image in previewImg so the crop
-      // overlay stays calibrated to the original geometry. The rendered output
-      // is available via Export/Copy; lastPng already holds it.
-      if (cropActive) {
-        previewImg.src = currentDataUrl;
-        var _raf_tok = myToken;
-        requestAnimationFrame(function () { if (_raf_tok === renderToken) _updateCropOverlay(); });
-      } else {
-        previewImg.src = 'data:image/png;base64,' + data.preview_b64;
-      }
-      previewWrap.style.display = 'flex';
-      dropZone.style.display    = 'none';
-      exportBtn.disabled = false;
-      copyBtn.disabled   = false;
-      setStatus('Rendered');
-    })
-    .catch(function (err) {
-      if (myToken !== renderToken) return;
-      setStatus('Error: ' + err.message, '#ff6b6b');
-    })
-    .finally(function () {
-      if (myToken !== renderToken) return;
-      renderBtn.disabled = false;
-    });
+      .then(function (r) {
+        if (!r.ok) {
+          return r.json().then(function (d) {
+            throw new Error(d.error || ('HTTP ' + r.status));
+          });
+        }
+        return r.json();
+      })
+      .then(function (data) {
+        if (myToken !== renderToken) return null;
+        if (myVersion !== editorVersion) return null;
+        lastPng = data.preview_b64;
+        hasUnrenderedChanges = false;
+        return data.preview_b64;
+      });
+  }
+
+  renderBtn.addEventListener('click', function () {
+    if (!currentDataUrl) return;
+    renderBtn.disabled = true;
+    var hadCrop = cropActive;
+    doRender()
+      .then(function (b64) {
+        if (b64 === null) {
+          // Result superseded by either a newer render or an edit that
+          // landed mid-flight. Leave the preview surface alone — the live
+          // overlay already reflects the user's latest state.
+          setStatus('Edits since render — press Render again', '#ffb454');
+          return;
+        }
+        // Briefly show the PIL-exact PNG so the user can confirm parity.
+        // When the crop overlay is active we keep the source image displayed
+        // so the overlay stays calibrated to the original geometry, and the
+        // live overlays stay visible on top of the source.
+        if (hadCrop) {
+          previewImg.src = currentDataUrl;
+          showingRenderedPng = false;
+          requestAnimationFrame(function () { _updateCropOverlay(); updateLiveText(); });
+        } else {
+          previewImg.src = 'data:image/png;base64,' + b64;
+          showingRenderedPng = true;
+          _hideAllTextLayers();
+        }
+        previewWrap.style.display = 'flex';
+        dropZone.style.display    = 'none';
+        setStatus('Rendered');
+      })
+      .catch(function (err) {
+        setStatus('Error: ' + err.message, '#ff6b6b');
+      })
+      .finally(function () {
+        if (currentDataUrl) renderBtn.disabled = false;
+      });
   });
 
+  // Resolve to a PNG base64 either from the cached lastPng (when nothing has
+  // changed since the last successful render) or by triggering a fresh render
+  // on demand. Export/Copy use this so the workflow does not depend on the
+  // user pressing Render first.
+  function _renderedPngForExport() {
+    if (!hasUnrenderedChanges && lastPng) return Promise.resolve(lastPng);
+    return doRender();
+  }
+
   exportBtn.addEventListener('click', function () {
-    if (!lastPng) return;
-    var a = document.createElement('a');
-    a.href = 'data:image/png;base64,' + lastPng;
-    a.download = 'meme.png';
-    a.click();
+    if (!currentDataUrl) return;
+    exportBtn.disabled = true;
+    copyBtn.disabled   = true;
+    _renderedPngForExport()
+      .then(function (b64) {
+        if (!b64) {
+          // doRender returned null: either a newer render started or the
+          // editor was edited mid-flight. Cache state is left untouched —
+          // the next click will render against the user's latest state.
+          setStatus('Edits since render — try Export again', '#ffb454');
+          return;
+        }
+        var a = document.createElement('a');
+        a.href = 'data:image/png;base64,' + b64;
+        a.download = 'meme.png';
+        a.click();
+        setStatus('Exported');
+      })
+      .catch(function (err) {
+        setStatus('Export failed: ' + err.message, '#ff6b6b');
+      })
+      .finally(function () {
+        if (currentDataUrl) {
+          exportBtn.disabled = false;
+          copyBtn.disabled   = false;
+        }
+      });
   });
 
   copyBtn.addEventListener('click', function () {
-    if (!lastPng) return;
+    if (!currentDataUrl) return;
     if (!window.ClipboardItem || !navigator.clipboard || !navigator.clipboard.write) {
       setStatus('Clipboard write not available in this browser', '#ffb454');
       return;
     }
-    var bin = atob(lastPng);
-    var arr = new Uint8Array(bin.length);
-    for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-    var blob = new Blob([arr], { type: 'image/png' });
-    navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-      .then(function () { setStatus('Copied to clipboard'); })
-      .catch(function (e) { setStatus('Copy failed: ' + e.message, '#ff6b6b'); });
+    exportBtn.disabled = true;
+    copyBtn.disabled   = true;
+    _renderedPngForExport()
+      .then(function (b64) {
+        if (!b64) {
+          setStatus('Edits since render — try Copy again', '#ffb454');
+          return null;
+        }
+        var bin = atob(b64);
+        var arr = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        var blob = new Blob([arr], { type: 'image/png' });
+        return navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+          .then(function () { return true; });
+      })
+      .then(function (res) {
+        if (res === true) setStatus('Copied to clipboard');
+      })
+      .catch(function (err) {
+        setStatus('Copy failed: ' + err.message, '#ff6b6b');
+      })
+      .finally(function () {
+        if (currentDataUrl) {
+          exportBtn.disabled = false;
+          copyBtn.disabled   = false;
+        }
+      });
   });
-
-  fetch('/templates')
-    .then(function (r) { return r.json(); })
-    .then(function (data) { buildGallery(data.templates || []); })
-    .catch(function () { /* gallery stays empty on network error — not critical */ });
 
 }());
 </script>
