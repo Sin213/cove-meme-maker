@@ -240,6 +240,18 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
 .text-layer{position:absolute;pointer-events:none;user-select:none;white-space:pre-line;text-align:center;line-height:1.05;transform-origin:center center;word-break:break-word;-webkit-font-smoothing:antialiased;display:none;letter-spacing:0;padding:0;margin:0}
 .text-layer.classic{font-weight:900}
 .text-layer.caption{font-weight:600;line-height:1.18}
+
+/* Modern caption band — approximates the white band the PIL renderer
+   composites above the source image (background_color = #fff). The band is
+   absolutely positioned over #preview-wrap; #preview-img is shifted down via
+   translateY(bandH/2) so the band + image stack stays vertically centred in
+   the wrap. Only active while styleMode === 'modern' and the source image is
+   showing (i.e. not showingRenderedPng). */
+.modern-band{position:absolute;background:#ffffff;display:none;align-items:center;justify-content:center;overflow:hidden;pointer-events:none;box-sizing:border-box;border-radius:4px 4px 0 0;box-shadow:0 -2px 32px rgba(0,0,0,0.30),0 0 0 1px rgba(255,255,255,0.04)}
+.modern-band.active{display:flex}
+.modern-band-text{font-family:"DejaVu Sans","Liberation Sans","Noto Sans",Arial,sans-serif;color:#000;font-weight:700;text-align:center;white-space:pre-line;line-height:1.18;width:100%;padding:0 4%;word-break:break-word;margin:0;-webkit-font-smoothing:antialiased}
+.modern-band-text.placeholder{color:rgba(0,0,0,0.30);font-weight:500;font-style:italic}
+#preview-wrap.modern-mode #preview-img{border-radius:0 0 4px 4px}
 </style>
 </head>
 <body>
@@ -269,6 +281,9 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
         <div id="top-text-layer" class="text-layer classic"></div>
         <div id="bottom-text-layer" class="text-layer classic"></div>
         <div id="caption-text-layer" class="text-layer caption"></div>
+        <div id="modern-band" class="modern-band">
+          <div id="modern-band-text" class="modern-band-text"></div>
+        </div>
         <div id="handle-layer">
           <div id="top-handle" class="drag-handle hidden">T</div>
           <div id="bottom-handle" class="drag-handle hidden">B</div>
@@ -470,6 +485,8 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   var topTextLayer    = document.getElementById('top-text-layer');
   var bottomTextLayer = document.getElementById('bottom-text-layer');
   var captionTextLayer= document.getElementById('caption-text-layer');
+  var modernBand     = document.getElementById('modern-band');
+  var modernBandText = document.getElementById('modern-band-text');
   var topHandle    = document.getElementById('top-handle');
   var bottomHandle = document.getElementById('bottom-handle');
   var topResizeHandle    = document.getElementById('top-resize-handle');
@@ -554,6 +571,92 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     topTextLayer.style.display = 'none';
     bottomTextLayer.style.display = 'none';
     captionTextLayer.style.display = 'none';
+    _clearModernLayout();
+  }
+
+  // Restore #preview-img to its untransformed flex-centred state and hide
+  // the white caption band. Called whenever Modern parity should NOT be on
+  // screen (Classic mode, no source image, or showingRenderedPng — when the
+  // PIL-baked PNG already contains a real band).
+  function _clearModernLayout() {
+    modernBand.classList.remove('active');
+    modernBandText.classList.remove('placeholder');
+    modernBandText.textContent = '';
+    previewWrap.classList.remove('modern-mode');
+    previewImg.style.maxHeight = '';
+    previewImg.style.transform = '';
+  }
+
+  // Approximation of PIL _render_modern: paints a white caption band above
+  // the source image whose height is padding_scale * imgHeight, with caption
+  // text centred inside the band at font_scale * imgHeight. The source image
+  // is shifted down by bandH/2 so the band + image stack stays vertically
+  // centred in #preview-wrap. Geometry recomputes on every input + resize.
+  function _layoutModernBand() {
+    if (!currentDataUrl) { _clearModernLayout(); return; }
+    if (showingRenderedPng) { _clearModernLayout(); return; }
+
+    // Mirror server clamps: padding_scale [0.05, 0.60], font_scale [0.02, 0.30].
+    var padPct  = parseFloat(padSl.value);
+    var padFrac = Math.max(0.05, Math.min(0.60,
+        (isFinite(padPct) ? padPct : 22) / 100));
+    var fsPct   = parseFloat(sizeSl.value);
+    fsPct       = Math.max(2, Math.min(30, isFinite(fsPct) ? fsPct : 9));
+
+    previewWrap.classList.add('modern-mode');
+
+    // Constrain #preview-img so band + image stack fits inside the wrap's
+    // content area. Wrap has 16px top + 16px bottom padding.
+    var wrapRect = previewWrap.getBoundingClientRect();
+    var availH   = Math.max(64, wrapRect.height - 32);
+    var maxImgH  = availH / (1 + padFrac);
+    previewImg.style.maxHeight = maxImgH + 'px';
+    // Reset transform before measuring so imgRect is pre-translate.
+    previewImg.style.transform = '';
+
+    requestAnimationFrame(function () {
+      if (styleMode !== 'modern' || !currentDataUrl || showingRenderedPng) {
+        _clearModernLayout();
+        return;
+      }
+      var imgRect = previewImg.getBoundingClientRect();
+      if (imgRect.width < 1 || imgRect.height < 1) {
+        modernBand.classList.remove('active');
+        return;
+      }
+      var wrapRect2 = previewWrap.getBoundingClientRect();
+      var bandH = Math.max(8, imgRect.height * padFrac);
+      var shift = bandH / 2;
+      previewImg.style.transform = 'translateY(' + shift + 'px)';
+
+      modernBand.style.left   = (imgRect.left - wrapRect2.left) + 'px';
+      modernBand.style.top    =
+          (imgRect.top - wrapRect2.top + shift - bandH) + 'px';
+      modernBand.style.width  = imgRect.width + 'px';
+      modernBand.style.height = bandH + 'px';
+      modernBand.classList.add('active');
+
+      var raw = captionText.value || '';
+      if (raw.trim().length) {
+        // textContent — never innerHTML — so user input cannot inject markup
+        // or scripts into the page.
+        modernBandText.textContent = raw;
+        modernBandText.classList.remove('placeholder');
+        modernBandText.style.color = captionColor.value;
+      } else {
+        modernBandText.textContent = '(caption)';
+        modernBandText.classList.add('placeholder');
+        // Clear inline color so the .placeholder CSS rule (muted grey) wins.
+        modernBandText.style.color = '';
+      }
+      modernBandText.style.fontSize = (imgRect.height * fsPct / 100) + 'px';
+
+      // After Modern layout finalises the image's maxHeight + translateY,
+      // re-measure the crop overlay so shades/handles track the moved image.
+      // Source-normalised cropRect.{x,y,width,height} are untouched; only
+      // the screen-space projection is refreshed.
+      if (cropActive) _updateCropOverlay();
+    });
   }
 
   function _styleTextLayer(which, layer) {
@@ -633,10 +736,12 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       _styleTextLayer('top',    topTextLayer);
       _styleTextLayer('bottom', bottomTextLayer);
       captionTextLayer.style.display = 'none';
+      _clearModernLayout();
     } else {
       topTextLayer.style.display = 'none';
       bottomTextLayer.style.display = 'none';
-      _styleTextLayer('caption', captionTextLayer);
+      captionTextLayer.style.display = 'none';
+      _layoutModernBand();
     }
   }
 

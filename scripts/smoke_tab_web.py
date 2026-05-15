@@ -753,6 +753,42 @@ def main() -> None:
             f"/render crop+non-string font: expected 400, got {s_crop_badfont}"
         print(f"  /render crop+top_font=99 (non-string) → 400 OK")
 
+        # Modern style happy path — caption renders into the white band the
+        # PIL renderer composites above the image. We only assert HTTP-level
+        # sanity (200 + PNG magic + positive payload size); pixel parity is
+        # out of scope for smoke.
+        status_modern, data_modern = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "style": "modern",
+            "caption": "smoke caption",
+        })
+        assert status_modern == 200, \
+            f"/render style=modern: expected 200, got {status_modern}: {data_modern}"
+        assert isinstance(data_modern, dict) and "preview_b64" in data_modern, \
+            f"/render style=modern: missing preview_b64: {data_modern}"
+        modern_png = base64.b64decode(data_modern["preview_b64"])
+        assert modern_png[:4] == b"\x89PNG", \
+            f"/render style=modern: expected PNG magic, got {modern_png[:4]!r}"
+        assert len(modern_png) > 0, "/render style=modern: empty PNG body"
+        print(f"  /render style=modern caption='smoke caption' → 200 PNG OK "
+              f"({len(modern_png)} bytes)")
+
+        # Modern with empty caption — PIL renderer returns the source image
+        # unchanged when caption is blank; still must return a valid PNG.
+        status_modern_empty, data_modern_empty = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "style": "modern",
+            "caption": "",
+        })
+        assert status_modern_empty == 200, \
+            f"/render style=modern empty caption: expected 200, got " \
+            f"{status_modern_empty}: {data_modern_empty}"
+        empty_png = base64.b64decode(data_modern_empty["preview_b64"])
+        assert empty_png[:4] == b"\x89PNG", \
+            f"/render style=modern empty caption: expected PNG magic, " \
+            f"got {empty_png[:4]!r}"
+        print(f"  /render style=modern caption='' → 200 PNG OK")
+
         # --- clean shutdown on socket close ---
         f.close()   # close file-object first to release the dup'd fd
         conn.close()
