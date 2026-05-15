@@ -144,9 +144,6 @@ html,body{height:100%;overflow:hidden;font-family:"Geist",Inter,ui-sans-serif,sy
 .tb-btn{background:transparent;color:#9a9aae;border:1px solid rgba(255,255,255,0.10);border-radius:6px;padding:0 10px;font-size:12px;height:26px;cursor:pointer;font-family:inherit;white-space:nowrap;flex-shrink:0;line-height:1}
 .tb-btn:hover:not(:disabled){color:#ececf1;background:#161620}
 .tb-btn:disabled{color:#6b6b80;border-color:rgba(255,255,255,0.06);cursor:default}
-.tb-btn.accent{background:#50e6cf;color:#0a0a0e;border-color:rgba(255,255,255,0.18);font-weight:600}
-.tb-btn.accent:hover:not(:disabled){background:#6cf0db}
-.tb-btn.accent:disabled{background:#161620;color:#6b6b80;border-color:rgba(255,255,255,0.06)}
 
 #canvas-stage{flex:1;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#08080d;transition:background 0.12s}
 #canvas-stage.drag-over{background:rgba(80,230,207,0.04)}
@@ -267,7 +264,6 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     <div id="canvas-toolbar">
       <span id="file-name">No file</span>
       <span id="file-meta"></span>
-      <button class="tb-btn accent" id="render-btn" disabled>Render</button>
       <button class="tb-btn" id="clear-btn" disabled>Clear</button>
     </div>
     <div id="canvas-stage">
@@ -449,7 +445,6 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   var fileInput   = document.getElementById('file-input');
   var fileNameEl  = document.getElementById('file-name');
   var fileMetaEl  = document.getElementById('file-meta');
-  var renderBtn   = document.getElementById('render-btn');
   var clearBtn    = document.getElementById('clear-btn');
   var stage       = document.getElementById('canvas-stage');
   var dropZone    = document.getElementById('drop-zone');
@@ -535,8 +530,8 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   }
 
   // Live text overlays — show top/bottom/caption directly on the canvas as
-  // inputs change so users do not have to press Render to see size, position,
-  // rotation, colour, stroke, all-caps, or font choice. Font parity is
+  // inputs change so the editor reflects size, position, rotation, colour,
+  // stroke, all-caps, and font choice in real time. Font parity is
   // approximate (browser falls back through the system font chain below;
   // Pillow uses bundled DejaVu Bold TrueType faces). Export/Copy still call
   // /render so the final PNG matches the standalone editor.
@@ -1161,7 +1156,6 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     currentDataUrl = null;
     lastPng = null;
     hasUnrenderedChanges = true;
-    renderBtn.disabled = true;
     exportBtn.disabled = true;
     copyBtn.disabled   = true;
     fileNameEl.textContent = file.name;
@@ -1178,7 +1172,6 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
         srcNaturalWidth  = img.naturalWidth || null;
         srcNaturalHeight = img.naturalHeight || null;
         srcNaturalAspect = img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : null;
-        renderBtn.disabled = false;
         clearBtn.disabled  = false;
         exportBtn.disabled = false;
         copyBtn.disabled   = false;
@@ -1186,7 +1179,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
         previewWrap.style.display = 'flex';
         previewImg.src = currentDataUrl;
         showingRenderedPng = false;
-        setStatus('Image loaded');
+        setStatus('Live preview active');
         _resetHandles();
         _resetSizeRot();
         _resetCrop();
@@ -1237,7 +1230,6 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     fileInput.value = '';
     fileNameEl.textContent = 'No file';
     fileMetaEl.textContent = '';
-    renderBtn.disabled = true;
     clearBtn.disabled  = true;
     exportBtn.disabled = true;
     copyBtn.disabled   = true;
@@ -1335,48 +1327,10 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       });
   }
 
-  renderBtn.addEventListener('click', function () {
-    if (!currentDataUrl) return;
-    renderBtn.disabled = true;
-    var hadCrop = cropActive;
-    doRender()
-      .then(function (b64) {
-        if (b64 === null) {
-          // Result superseded by either a newer render or an edit that
-          // landed mid-flight. Leave the preview surface alone — the live
-          // overlay already reflects the user's latest state.
-          setStatus('Edits since render — press Render again', '#ffb454');
-          return;
-        }
-        // Briefly show the PIL-exact PNG so the user can confirm parity.
-        // When the crop overlay is active we keep the source image displayed
-        // so the overlay stays calibrated to the original geometry, and the
-        // live overlays stay visible on top of the source.
-        if (hadCrop) {
-          previewImg.src = currentDataUrl;
-          showingRenderedPng = false;
-          requestAnimationFrame(function () { _updateCropOverlay(); updateLiveText(); });
-        } else {
-          previewImg.src = 'data:image/png;base64,' + b64;
-          showingRenderedPng = true;
-          _hideAllTextLayers();
-        }
-        previewWrap.style.display = 'flex';
-        dropZone.style.display    = 'none';
-        setStatus('Rendered');
-      })
-      .catch(function (err) {
-        setStatus('Error: ' + err.message, '#ff6b6b');
-      })
-      .finally(function () {
-        if (currentDataUrl) renderBtn.disabled = false;
-      });
-  });
-
   // Resolve to a PNG base64 either from the cached lastPng (when nothing has
   // changed since the last successful render) or by triggering a fresh render
-  // on demand. Export/Copy use this so the workflow does not depend on the
-  // user pressing Render first.
+  // on demand. Export/Copy use this so the user never has to trigger a
+  // render explicitly — the live preview is the primary editing surface.
   function _renderedPngForExport() {
     if (!hasUnrenderedChanges && lastPng) return Promise.resolve(lastPng);
     return doRender();
@@ -1392,7 +1346,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
           // doRender returned null: either a newer render started or the
           // editor was edited mid-flight. Cache state is left untouched —
           // the next click will render against the user's latest state.
-          setStatus('Edits since render — try Export again', '#ffb454');
+          setStatus('Newer edits — try Export again', '#ffb454');
           return;
         }
         var a = document.createElement('a');
@@ -1423,7 +1377,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     _renderedPngForExport()
       .then(function (b64) {
         if (!b64) {
-          setStatus('Edits since render — try Copy again', '#ffb454');
+          setStatus('Newer edits — try Copy again', '#ffb454');
           return null;
         }
         var bin = atob(b64);
