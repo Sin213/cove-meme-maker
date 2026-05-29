@@ -22,6 +22,7 @@ import signal
 import socket
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -53,6 +54,43 @@ _SIZE_PCT_MAX = 30.0
 _ROTATION_MIN = -180.0  # clockwise degrees
 _ROTATION_MAX =  180.0
 _CROP_MIN_DIM =  0.01   # minimum width or height of crop region (normalised)
+
+# ---------------------------------------------------------------------------
+# /render rate limiter (token bucket, shared across all threads)
+# ---------------------------------------------------------------------------
+
+class _RenderRateLimiter:
+    """Token-bucket rate limiter for /render requests.
+
+    Parameters
+    ----------
+    capacity:
+        Maximum burst size (tokens).
+    refill_rate:
+        Tokens added per second (steady-state throughput).
+    """
+
+    def __init__(self, capacity: float = 10.0, refill_rate: float = 4.0) -> None:
+        self._capacity = capacity
+        self._refill_rate = refill_rate
+        self._tokens = capacity
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> bool:
+        """Try to consume one token.  Returns True if allowed, False if rate-limited."""
+        now = time.monotonic()
+        with self._lock:
+            elapsed = now - self._last
+            self._last = now
+            self._tokens = min(self._capacity, self._tokens + elapsed * self._refill_rate)
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return True
+            return False
+
+
+_render_rate_limiter = _RenderRateLimiter()
 
 # ---------------------------------------------------------------------------
 # Template registry
@@ -1621,6 +1659,12 @@ class _Handler(BaseHTTPRequestHandler):
                     json.dumps({"error": msg}).encode())
 
     def _handle_render(self) -> None:
+        # --- Rate limiting ---
+        if not _render_rate_limiter.acquire():
+            self._reply(429, "application/json",
+                        json.dumps({"error": "too many requests"}).encode())
+            return
+
         # --- Content-Length validation ---
         raw_cl = self.headers.get("Content-Length")
         if raw_cl is None:

@@ -38,3 +38,10 @@ codex-reviews/
 CLAUDE.md
 WORKFLOW.md
 RELEASES.md
+AGENTS.md
+.claudeignore
+
+.codex-reviews/
+
+# Session aids (orientation snapshots)
+*-orientation.md

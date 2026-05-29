@@ -12,6 +12,7 @@ the source; the caller decides whether to save or show it.
 """
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -22,6 +23,18 @@ Style = Literal["classic", "modern"]
 
 
 RGB = tuple[int, int, int]
+
+# ---------------------------------------------------------------------------
+# Module-level singletons
+# ---------------------------------------------------------------------------
+
+# Reused across all text-measurement calls to avoid repeated heap allocation.
+# PIL's ImageDraw.Draw on a 1×1 scratch image is stateless for textbbox calls.
+_SCRATCH_RGBA = Image.new("RGBA", (1, 1))
+_MEASURER_RGBA: ImageDraw.ImageDraw = ImageDraw.Draw(_SCRATCH_RGBA)
+
+_SCRATCH_RGB = Image.new("RGB", (1, 1))
+_MEASURER_RGB: ImageDraw.ImageDraw = ImageDraw.Draw(_SCRATCH_RGB)
 
 
 @dataclass
@@ -117,6 +130,7 @@ def _apply_crop(img: Image.Image, crop: tuple[float, float, float, float]) -> Im
     return img.crop((left, top, right, bottom))
 
 
+@functools.lru_cache(maxsize=64)
 def _font(
     names: tuple[str, ...],
     size: int,
@@ -196,7 +210,7 @@ def _render_classic_block(
     max_width = int(w * (1.0 - 2 * spec.side_margin))
     xform = str.upper if spec.uppercase else (lambda s: s)
 
-    measurer = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    measurer = _MEASURER_RGBA
     lines = _wrap(xform(text), font, max_width, measurer)
     if not lines:
         return None
@@ -261,7 +275,7 @@ def _render_modern(img: Image.Image, spec: MemeSpec) -> Image.Image:
     font = _font((), font_size, spec.font_path)
     max_width = int(w * (1.0 - 2 * spec.side_margin))
 
-    measurer = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    measurer = _MEASURER_RGB
     lines = _wrap(spec.caption, font, max_width, measurer)
     line_h = _line_height(font)
     gap = max(2, font_size // 8)
@@ -307,7 +321,7 @@ def classic_block_geometry(
     max_width = int(w * (1.0 - 2 * spec.side_margin))
     xform = str.upper if spec.uppercase else (lambda s: s)
 
-    measurer = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    measurer = _MEASURER_RGBA
     lines = _wrap(xform(text), font, max_width, measurer)
     if not lines:
         return None
