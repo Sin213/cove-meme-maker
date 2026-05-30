@@ -11,7 +11,7 @@ cd "$ROOT"
 
 APP_NAME="cove-meme-maker"
 DISPLAY_NAME="Cove Meme Maker"
-VERSION="${VERSION:-2.2.0}"
+VERSION="${VERSION:-2.3.0}"
 RELEASE_DIR="$ROOT/release"
 DIST_DIR="$ROOT/dist"
 BUILD_DIR="$ROOT/build"
