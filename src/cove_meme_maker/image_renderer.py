@@ -13,6 +13,7 @@ the source; the caller decides whether to save or show it.
 from __future__ import annotations
 
 import functools
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -20,6 +21,17 @@ from typing import Literal
 from PIL import Image, ImageDraw, ImageFont
 
 Style = Literal["classic", "modern"]
+
+# ---------------------------------------------------------------------------
+# Bundled font path — used as last-resort FreeType fallback before bitmap.
+# Resolved at import time so frozen (PyInstaller _MEIPASS) and source runs
+# both find the font without any per-call filesystem overhead.
+# ---------------------------------------------------------------------------
+_BUNDLED_FONT: Path = (
+    Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+    else Path(__file__).resolve().parent
+) / "assets" / "fonts" / "DejaVuSans-Bold.ttf"
 
 
 RGB = tuple[int, int, int]
@@ -146,10 +158,16 @@ def _font(
             return ImageFont.truetype(str(path), size=size)
         except OSError:
             pass
+    if _BUNDLED_FONT.exists():
+        try:
+            return ImageFont.truetype(str(_BUNDLED_FONT), size=size)
+        except OSError:
+            pass
     try:
         return ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
     except OSError:
-        return ImageFont.load_default()
+        pass
+    return ImageFont.load_default()
 
 
 def _block_font_names(spec: MemeSpec, which: Literal["top", "bottom"]) -> tuple[str, ...]:
