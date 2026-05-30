@@ -28,7 +28,7 @@ Style = Literal["classic", "modern"]
 # both find the font without any per-call filesystem overhead.
 # ---------------------------------------------------------------------------
 _BUNDLED_FONT: Path = (
-    Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    Path(sys._MEIPASS) / "cove_meme_maker"  # type: ignore[attr-defined]
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
     else Path(__file__).resolve().parent
 ) / "assets" / "fonts" / "DejaVuSans-Bold.ttf"
