@@ -1,5 +1,6 @@
-# PyInstaller spec for Cove Meme Maker (one-dir bundle)
-# Run via: pyinstaller packaging/cove-meme-maker.spec
+# PyInstaller spec for Cove Meme Maker (macOS .app bundle)
+# Run via: pyinstaller packaging/cove-meme-maker-macos.spec
+import os
 from pathlib import Path
 
 block_cipher = None
@@ -7,6 +8,9 @@ PROJECT_ROOT = Path(SPECPATH).parent
 SRC = PROJECT_ROOT / "src"
 ASSETS = SRC / "cove_meme_maker" / "assets"
 TEMPLATES = SRC / "cove_meme_maker" / "templates"
+
+_VERSION = os.environ.get("VERSION", "0.0.0")
+_ICON = os.environ.get("ICON_ICNS_PATH", str(ASSETS / "cove_icon.png"))
 
 a = Analysis(
     [str(PROJECT_ROOT / "packaging" / "launcher.py")],
@@ -52,7 +56,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
-    icon=str(ASSETS / "cove_icon.png"),
+    icon=_ICON,
 )
 
 coll = COLLECT(
@@ -64,4 +68,20 @@ coll = COLLECT(
     upx=False,
     upx_exclude=[],
     name="cove-meme-maker",
+)
+
+app = BUNDLE(
+    coll,
+    name="Cove Meme Maker.app",
+    icon=_ICON,
+    bundle_identifier="com.cove.meme-maker",
+    info_plist={
+        "CFBundleName": "Cove Meme Maker",
+        "CFBundleDisplayName": "Cove Meme Maker",
+        "CFBundleShortVersionString": _VERSION,
+        "CFBundleVersion": _VERSION,
+        "NSHighResolutionCapable": True,
+        "NSRequiresAquaSystemAppearance": False,
+        "LSMinimumSystemVersion": "12.0",
+    },
 )
