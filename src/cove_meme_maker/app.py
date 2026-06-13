@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 
 from PIL import Image
@@ -49,6 +50,7 @@ from PySide6.QtWidgets import (
 
 from . import __version__, theme, updater
 from . import fonts
+from .portable import is_portable, portable_data_dir
 from .chrome import CoveTitleBar, FramelessResizer
 from .crop_dialog import CropDialog
 from .image_renderer import (
@@ -313,7 +315,11 @@ class MainWindow(QMainWindow):
         self._pixmap_src_size: tuple[int, int] = (0, 0)
 
         self._font_choices = fonts.list_choices()
-        self._settings = QSettings("Cove", "cove-meme-maker")
+        if is_portable():
+            _portable_dir = portable_data_dir("cove-meme-maker")
+            self._settings = QSettings(os.path.join(_portable_dir, "settings.ini"), QSettings.IniFormat)
+        else:
+            self._settings = QSettings("Cove", "cove-meme-maker")
 
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
