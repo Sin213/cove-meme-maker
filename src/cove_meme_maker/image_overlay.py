@@ -198,6 +198,7 @@ class ImageOverlay(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton and self._drag.mode:
             self._drag = _DragState()
+            self._release_mouse()
             self._update_hover(event.position())
             self.dragFinished.emit()
             event.accept()
@@ -225,6 +226,7 @@ class ImageOverlay(QWidget):
         c = self._norm_to_widget(geom.x, geom.y)
         self._drag = _DragState(index=index, mode="move", grab_offset=p - c)
         self.setCursor(Qt.SizeAllCursor)
+        self._grab_mouse()
 
     def _begin_resize(self, index: int, p: QPointF) -> None:
         geom = self._overlays[index]
@@ -236,6 +238,19 @@ class ImageOverlay(QWidget):
             resize_start_dist=dist,
             resize_start_width=geom.width,
         )
+        self._grab_mouse()
+
+    def _grab_mouse(self) -> None:
+        # The topmost sibling (TextOverlay) receives the initial press and holds
+        # the implicit mouse grab; without an explicit grab here the follow-up
+        # move/release events never reach this widget and drag/resize appear
+        # dead. Take the grab for the duration of the gesture.
+        if QWidget.mouseGrabber() is not self:
+            self.grabMouse()
+
+    def _release_mouse(self) -> None:
+        if QWidget.mouseGrabber() is self:
+            self.releaseMouse()
 
     # -- gesture handlers ---------------------------------------------
 
@@ -249,6 +264,12 @@ class ImageOverlay(QWidget):
         scale = cur_dist / self._drag.resize_start_dist
         new_width = max(self._min_width_norm(), self._drag.resize_start_width * scale)
         self.overlayResized.emit(self._drag.index, new_width)
+
+    def hideEvent(self, event) -> None:  # noqa: ANN001
+        # Never leave the app stuck with mouse capture if we are hidden mid-drag.
+        self._drag = _DragState()
+        self._release_mouse()
+        super().hideEvent(event)
 
     # -- keyboard ------------------------------------------------------
 
