@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image
@@ -56,10 +57,12 @@ from .chrome import CoveTitleBar, FramelessResizer
 from .crop_dialog import CropDialog
 from .image_renderer import (
     MemeSpec,
+    OverlaySpec,
     classic_block_geometry,
     render,
     render_to_file,
 )
+from .image_overlay import ImageGeom, ImageOverlay
 from .text_overlay import BlockGeom, TextOverlay
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
@@ -280,6 +283,22 @@ class DropZone(QFrame):
         super().mousePressEvent(event)
 
 
+@dataclass
+class _OverlayState:
+    """Desktop-side state for one image overlay.
+
+    ``image`` is always the original imported RGBA image (never a resized
+    preview copy). ``x`` / ``y`` / ``width`` are normalised to the base-image
+    region, matching :class:`OverlaySpec` semantics.
+    """
+
+    image: Image.Image
+    source_path: str | None
+    x: float
+    y: float
+    width: float
+
+
 class PreviewLabel(QLabel):
     pressed = Signal()
 
@@ -319,6 +338,8 @@ class MainWindow(QMainWindow):
         self._bottom_rotation: float = 0.0
         self._pixmap_rect = QRectF()
         self._pixmap_src_size: tuple[int, int] = (0, 0)
+        self._overlays: list[_OverlayState] = []
+        self._selected_overlay: int | None = None
 
         self._font_choices = fonts.list_choices()
         if is_portable():
@@ -415,6 +436,30 @@ class MainWindow(QMainWindow):
         self.crop_btn.clicked.connect(self._on_crop_clicked)
         self.crop_btn.setEnabled(False)
 
+        self.add_image_btn = QPushButton("Add Image")
+        self.add_image_btn.setProperty("class", "tb-btn")
+        self.add_image_btn.setToolTip("Add an image overlay (logo, sticker)")
+        self.add_image_btn.clicked.connect(self._on_add_overlay)
+        self.add_image_btn.setEnabled(False)
+
+        self.remove_overlay_btn = QPushButton("Remove")
+        self.remove_overlay_btn.setProperty("class", "tb-btn")
+        self.remove_overlay_btn.setToolTip("Remove the selected image overlay")
+        self.remove_overlay_btn.clicked.connect(self._on_remove_overlay)
+        self.remove_overlay_btn.setEnabled(False)
+
+        self.forward_overlay_btn = QPushButton("Bring Forward")
+        self.forward_overlay_btn.setProperty("class", "tb-btn")
+        self.forward_overlay_btn.setToolTip("Move the selected overlay up one layer")
+        self.forward_overlay_btn.clicked.connect(self._on_overlay_forward)
+        self.forward_overlay_btn.setEnabled(False)
+
+        self.backward_overlay_btn = QPushButton("Send Backward")
+        self.backward_overlay_btn.setProperty("class", "tb-btn")
+        self.backward_overlay_btn.setToolTip("Move the selected overlay down one layer")
+        self.backward_overlay_btn.clicked.connect(self._on_overlay_backward)
+        self.backward_overlay_btn.setEnabled(False)
+
         self.reset_btn = QPushButton("Reset")
         self.reset_btn.setProperty("class", "tb-btn")
         self.reset_btn.setToolTip("Reset text position / size / rotation")
@@ -428,6 +473,10 @@ class MainWindow(QMainWindow):
         self.clear_btn.setEnabled(False)
 
         tb_layout.addWidget(self.crop_btn)
+        tb_layout.addWidget(self.add_image_btn)
+        tb_layout.addWidget(self.remove_overlay_btn)
+        tb_layout.addWidget(self.forward_overlay_btn)
+        tb_layout.addWidget(self.backward_overlay_btn)
         tb_layout.addWidget(self.reset_btn)
         tb_layout.addWidget(self.clear_btn)
         canvas_layout.addWidget(toolbar)
@@ -454,7 +503,18 @@ class MainWindow(QMainWindow):
         self.preview_label.hide()
         stage_layout.addWidget(self.preview_label, stretch=1)
 
-        self.text_overlay = TextOverlay(self.preview_label)
+        # Parent chain: PreviewLabel -> ImageOverlay -> TextOverlay. Text input
+        # is handled first; ignored empty-space events propagate to the image
+        # overlay, then to the preview label.
+        self.image_overlay = ImageOverlay(self.preview_label)
+        self.image_overlay.overlaySelected.connect(self._on_overlay_selected)
+        self.image_overlay.overlayMoved.connect(self._on_overlay_moved)
+        self.image_overlay.overlayResized.connect(self._on_overlay_resized)
+        self.image_overlay.overlayDeleted.connect(self._on_overlay_deleted)
+        self.image_overlay.dragFinished.connect(self._refresh_preview)
+        self.image_overlay.hide()
+
+        self.text_overlay = TextOverlay(self.image_overlay)
         self.text_overlay.positionChanged.connect(self._on_text_position_changed)
         self.text_overlay.sizeChanged.connect(self._on_text_size_changed)
         self.text_overlay.rotationChanged.connect(self._on_text_rotation_changed)
@@ -714,6 +774,7 @@ class MainWindow(QMainWindow):
         self._bottom_size_pct = None
         self._top_rotation = 0.0
         self._bottom_rotation = 0.0
+        self._clear_overlays()
         self.file_name_label.setText(path.name)
         self.file_meta_label.setText(f"{img.width}×{img.height}")
         self.status_doc.setText(f"{img.width}×{img.height}")
@@ -732,12 +793,14 @@ class MainWindow(QMainWindow):
         self._bottom_size_pct = None
         self._top_rotation = 0.0
         self._bottom_rotation = 0.0
+        self._clear_overlays()
         self.file_name_label.setText("No image — drop a file or click Open")
         self.file_meta_label.setText("—")
         self.status_doc.setText("—")
         self.preview_label.clear()
         self.preview_label.hide()
         self.text_overlay.hide()
+        self.image_overlay.hide()
         self.drop_zone.show()
         self.top_edit.clear()
         self.bottom_edit.clear()
@@ -809,6 +872,15 @@ class MainWindow(QMainWindow):
             bottom_size_pct=self._bottom_size_pct,
             top_rotation=self._top_rotation,
             bottom_rotation=self._bottom_rotation,
+            overlays=tuple(
+                OverlaySpec(
+                    image=overlay.image,
+                    x=overlay.x,
+                    y=overlay.y,
+                    width=overlay.width,
+                )
+                for overlay in self._overlays
+            ),
         )
 
     def _schedule_preview(self) -> None:
@@ -841,7 +913,47 @@ class MainWindow(QMainWindow):
         pw, ph = scaled.width(), scaled.height()
         self._pixmap_rect = QRectF((lw - pw) / 2, (lh - ph) / 2, pw, ph)
         self._pixmap_src_size = (rendered.width, rendered.height)
+        self._sync_image_overlay()
         self._sync_overlay()
+
+    def _base_display_rect(self) -> QRectF:
+        """Base-image region (post-crop, below any Modern band) in widget coords."""
+        if self._preview_base is None:
+            return QRectF()
+        rendered_w, rendered_h = self._pixmap_src_size
+        base_w, base_h = self._preview_base.width, self._preview_base.height
+        if rendered_w <= 0 or rendered_h <= 0 or base_w <= 0 or base_h <= 0:
+            return QRectF()
+        scale = self._pixmap_rect.width() / rendered_w
+        band_offset = rendered_h - base_h  # >0 for Modern's caption band, else 0
+        return QRectF(
+            self._pixmap_rect.x(),
+            self._pixmap_rect.y() + band_offset * scale,
+            base_w * scale,
+            base_h * scale,
+        )
+
+    def _sync_image_overlay(self) -> None:
+        if self._preview_base is None:
+            self.image_overlay.hide()
+            return
+        self.image_overlay.show()
+        self.image_overlay.setGeometry(
+            0, 0, self.preview_label.width(), self.preview_label.height(),
+        )
+        self.image_overlay.set_base_rect(self._base_display_rect())
+        self.image_overlay.set_base_size(
+            (self._preview_base.width, self._preview_base.height)
+        )
+        geoms = [
+            ImageGeom(
+                x=ov.x, y=ov.y, width=ov.width,
+                aspect=(ov.image.height / ov.image.width if ov.image.width else 1.0),
+            )
+            for ov in self._overlays
+        ]
+        selected = self._selected_overlay if self._selected_overlay is not None else -1
+        self.image_overlay.set_overlays(geoms, selected)
 
     def _sync_overlay(self) -> None:
         if self._preview_base is None or not self.style_classic.isChecked():
@@ -872,6 +984,9 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event):  # noqa: ANN001
         if obj is self.preview_label and event.type() == QEvent.Resize:
+            self.image_overlay.setGeometry(
+                0, 0, self.preview_label.width(), self.preview_label.height(),
+            )
             self.text_overlay.setGeometry(
                 0, 0, self.preview_label.width(), self.preview_label.height(),
             )
@@ -911,10 +1026,117 @@ class MainWindow(QMainWindow):
 
     def _on_active_block_changed(self, which: str) -> None:
         if which:
+            # A text block took selection — image overlays must not stay selected.
+            if self._selected_overlay is not None:
+                self._selected_overlay = None
+                self.image_overlay.clear_selection()
+                self._update_overlay_controls()
             self._status(f"Editing {which} text — drag to move, corner to resize, bubble to rotate")
 
     def _on_global_size_changed(self) -> None:
         self._schedule_preview()
+
+    # ── Image overlay controls ─────────────────────────────────────────
+
+    def _on_add_overlay(self) -> None:
+        if self._preview_base is None:
+            return
+        base_w = self._preview_base.width
+        if base_w < 1:
+            return
+        start_dir = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Add image overlay", start_dir,
+            "Images (*.png *.jpg *.jpeg *.webp);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            with Image.open(path) as loaded:
+                image = loaded.convert("RGBA").copy()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Could not open image", str(exc))
+            return
+        if image.width < 1 or image.height < 1:
+            return
+        width = min(0.30, image.width / base_w)
+        self._overlays.append(
+            _OverlayState(image=image, source_path=path, x=0.5, y=0.5, width=width)
+        )
+        self._selected_overlay = len(self._overlays) - 1
+        self.text_overlay.clear_active()
+        self._status("Added image overlay")
+        self._update_overlay_controls()
+        self._refresh_preview()
+
+    def _on_remove_overlay(self) -> None:
+        i = self._selected_overlay
+        if i is None or not (0 <= i < len(self._overlays)):
+            return
+        del self._overlays[i]
+        self._selected_overlay = None
+        self._status("Removed image overlay")
+        self._update_overlay_controls()
+        self._refresh_preview()
+
+    def _on_overlay_forward(self) -> None:
+        i = self._selected_overlay
+        if i is None or i >= len(self._overlays) - 1:
+            return
+        self._overlays[i], self._overlays[i + 1] = self._overlays[i + 1], self._overlays[i]
+        self._selected_overlay = i + 1
+        self._update_overlay_controls()
+        self._refresh_preview()
+
+    def _on_overlay_backward(self) -> None:
+        i = self._selected_overlay
+        if i is None or i <= 0:
+            return
+        self._overlays[i], self._overlays[i - 1] = self._overlays[i - 1], self._overlays[i]
+        self._selected_overlay = i - 1
+        self._update_overlay_controls()
+        self._refresh_preview()
+
+    def _on_overlay_selected(self, index: int) -> None:
+        self._selected_overlay = index if index >= 0 else None
+        if self._selected_overlay is not None:
+            # Selection is exclusive with text blocks.
+            self.text_overlay.clear_active()
+        self._update_overlay_controls()
+
+    def _on_overlay_moved(self, index: int, x: float, y: float) -> None:
+        if 0 <= index < len(self._overlays):
+            self._overlays[index].x = x
+            self._overlays[index].y = y
+            self._refresh_preview()
+
+    def _on_overlay_resized(self, index: int, width: float) -> None:
+        if 0 <= index < len(self._overlays):
+            self._overlays[index].width = width
+            self._refresh_preview()
+
+    def _on_overlay_deleted(self, index: int) -> None:
+        if 0 <= index < len(self._overlays):
+            del self._overlays[index]
+            self._selected_overlay = None
+            self._status("Removed image overlay")
+            self._update_overlay_controls()
+            self._refresh_preview()
+
+    def _clear_overlays(self) -> None:
+        self._overlays = []
+        self._selected_overlay = None
+        self.image_overlay.clear_selection()
+        self._update_overlay_controls()
+
+    def _update_overlay_controls(self) -> None:
+        loaded = self._preview_base is not None
+        i = self._selected_overlay
+        has_sel = loaded and i is not None and 0 <= i < len(self._overlays)
+        self.add_image_btn.setEnabled(loaded)
+        self.remove_overlay_btn.setEnabled(has_sel)
+        self.forward_overlay_btn.setEnabled(has_sel and i < len(self._overlays) - 1)
+        self.backward_overlay_btn.setEnabled(has_sel and i > 0)
 
     # ── Export ─────────────────────────────────────────────────────────
 
@@ -970,6 +1192,7 @@ class MainWindow(QMainWindow):
             self.crop_btn, self.reset_btn, self.clear_btn,
         ):
             w.setEnabled(loaded)
+        self._update_overlay_controls()
         self._on_style_toggled()
 
     # ── Settings ───────────────────────────────────────────────────────

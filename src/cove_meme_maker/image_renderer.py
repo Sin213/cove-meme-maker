@@ -13,6 +13,7 @@ the source; the caller decides whether to save or show it.
 from __future__ import annotations
 
 import functools
+import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +36,23 @@ _BUNDLED_FONT: Path = (
 
 
 RGB = tuple[int, int, int]
+
+
+@dataclass(frozen=True)
+class OverlaySpec:
+    """One image overlay composited onto the post-crop base image.
+
+    ``x`` / ``y`` are the normalised centre relative to the post-crop base
+    width / height. ``width`` is the overlay width as a fraction of the base
+    width; height is always derived from the source image aspect ratio.
+    Coordinates are intentionally not clamped. Tuple order defines z-order:
+    later overlays render above earlier ones.
+    """
+
+    image: Image.Image
+    x: float = 0.5
+    y: float = 0.5
+    width: float = 0.3
 
 # ---------------------------------------------------------------------------
 # Module-level singletons
@@ -90,6 +108,10 @@ class MemeSpec:
     # Normalised crop region (x, y, width, height) in [0, 1] relative to the
     # source image. Applied before text rendering. None means no crop.
     crop: tuple[float, float, float, float] | None = None
+    # Image overlays composited onto the post-crop base, in z-order (later
+    # overlays render on top). Empty means "no overlays" — identical output
+    # to the pre-overlay renderer.
+    overlays: tuple[OverlaySpec, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +122,8 @@ def render(source: Image.Image | Path, spec: MemeSpec) -> Image.Image:
     img = _load(source).convert("RGB")
     if spec.crop is not None:
         img = _apply_crop(img, spec.crop)
+    if spec.overlays:
+        img = _composite_overlays(img, spec.overlays)
     if spec.style == "classic":
         return _render_classic(img, spec)
     return _render_modern(img, spec)
@@ -140,6 +164,63 @@ def _apply_crop(img: Image.Image, crop: tuple[float, float, float, float]) -> Im
     right = max(left + 1, min(right, w))
     bottom = max(top + 1, min(bottom, h))
     return img.crop((left, top, right, bottom))
+
+
+def _composite_overlays(
+    base: Image.Image,
+    overlays: tuple[OverlaySpec, ...],
+) -> Image.Image:
+    """Composite image overlays onto ``base`` and return a flattened RGB image.
+
+    Overlays are resized from their original source every call (LANCZOS),
+    positioned by normalised centre, clipped to the base canvas, and alpha
+    composited. Off-canvas and degenerate overlays are skipped. The base is
+    never mutated.
+    """
+    canvas = base.convert("RGBA")
+    bw, bh = canvas.size
+    if bw <= 0 or bh <= 0:
+        return base.copy()
+    for ov in overlays:
+        src = ov.image
+        sw, sh = src.size
+        if sw <= 0 or sh <= 0:
+            continue
+        out_w = int(round(ov.width * bw))
+        out_h = int(round(out_w * sh / sw))
+        if out_w < 1 or out_h < 1:
+            continue
+        # Destination rectangle from the normalised centre (unclamped).
+        cx = ov.x * bw
+        cy = ov.y * bh
+        dst_left = int(round(cx - out_w / 2))
+        dst_top = int(round(cy - out_h / 2))
+        dst_right = dst_left + out_w
+        dst_bottom = dst_top + out_h
+        # Intersect with the base canvas; skip fully off-canvas overlays.
+        vis_left = max(0, dst_left)
+        vis_top = max(0, dst_top)
+        vis_right = min(bw, dst_right)
+        vis_bottom = min(bh, dst_bottom)
+        if vis_right <= vis_left or vis_bottom <= vis_top:
+            continue
+        # Map the visible destination sub-rectangle back to source pixels and
+        # resize only that portion. This bounds every allocation to the base
+        # canvas size regardless of overlay.width — a huge (unclamped) width
+        # with most of the overlay off-canvas never resizes a giant image.
+        src_left = max(0, int((vis_left - dst_left) * sw / out_w))
+        src_top = max(0, int((vis_top - dst_top) * sh / out_h))
+        src_right = min(sw, int(math.ceil((vis_right - dst_left) * sw / out_w)))
+        src_bottom = min(sh, int(math.ceil((vis_bottom - dst_top) * sh / out_h)))
+        if src_right <= src_left or src_bottom <= src_top:
+            continue
+        piece = src.convert("RGBA").crop((src_left, src_top, src_right, src_bottom))
+        piece = piece.resize(
+            (vis_right - vis_left, vis_bottom - vis_top),
+            resample=Image.Resampling.LANCZOS,
+        )
+        canvas.alpha_composite(piece, (vis_left, vis_top))
+    return canvas.convert("RGB")
 
 
 @functools.lru_cache(maxsize=64)
