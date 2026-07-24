@@ -24,7 +24,11 @@ from PySide6.QtCore import QEvent, QPointF, QRectF, Qt  # noqa: E402
 from PySide6.QtGui import QMouseEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
-from cove_meme_maker.image_overlay import ImageGeom, ImageOverlay  # noqa: E402
+from cove_meme_maker.image_overlay import (  # noqa: E402
+    _ANCHOR_OFFSET,
+    ImageGeom,
+    ImageOverlay,
+)
 
 _app = QApplication.instance() or QApplication([])
 
@@ -122,6 +126,73 @@ class ImageOverlayInteractionTest(unittest.TestCase):
             _release(self.ov, (out_x, out_y))
             self.assertTrue(self.resized, f"{name} handle should resize")
             self.assertGreater(self.resized[-1][1], 0.5, f"{name} should grow")
+
+    def _anchor_point(self):
+        rect = self.ov._overlay_rect(self.ov._overlays[0])
+        return (rect.center().x(), rect.top() - _ANCHOR_OFFSET)
+
+    def test_selected_overlay_has_top_anchor_centered_above(self):
+        rect = self.ov._overlay_rect(self.ov._overlays[0])
+        ax, ay = self._anchor_point()
+        # Horizontally centered over the displayed rectangle...
+        self.assertAlmostEqual(ax, rect.center().x(), places=6)
+        # ...and outside it, above the top edge by the intended spacing.
+        self.assertLess(ay, rect.top())
+        self.assertAlmostEqual(rect.top() - ay, _ANCHOR_OFFSET, places=6)
+
+    def test_anchor_drag_moves_horizontally_only(self):
+        ax, ay = self._anchor_point()
+        _press(self.ov, (ax, ay))
+        self.assertIs(QWidget.mouseGrabber(), self.ov, "anchor press must grab")
+        _move(self.ov, (ax + 60, ay))  # purely horizontal
+        _release(self.ov, (ax + 60, ay))
+        self.assertTrue(self.moved, "anchor drag should emit overlayMoved")
+        self.assertFalse(self.resized, "anchor drag must not resize")
+        i, x, y = self.moved[-1]
+        self.assertGreater(x, 0.5, "moved right")
+        self.assertAlmostEqual(y, 0.5, places=2, msg="vertical unchanged")
+        self.assertIsNone(QWidget.mouseGrabber(), "grab released on mouse up")
+
+    def test_anchor_drag_moves_diagonally_preserving_width(self):
+        w0 = self.ov._overlays[0].width
+        ax, ay = self._anchor_point()
+        _press(self.ov, (ax, ay))
+        _move(self.ov, (ax + 50, ay + 40))  # diagonal
+        _release(self.ov, (ax + 50, ay + 40))
+        self.assertTrue(self.moved)
+        _, x, y = self.moved[-1]
+        self.assertGreater(x, 0.5)
+        self.assertGreater(y, 0.5)
+        self.assertFalse(self.resized)
+        # Canonical width is owned by app state; the widget must not emit a resize.
+        self.assertEqual(self.ov._overlays[0].width, w0)
+
+    def test_anchor_press_grabs_and_hide_releases(self):
+        ax, ay = self._anchor_point()
+        _press(self.ov, (ax, ay))
+        self.assertIs(QWidget.mouseGrabber(), self.ov)
+        self.ov.hide()
+        QApplication.processEvents()
+        self.assertIsNot(QWidget.mouseGrabber(), self.ov, "hide must release grab")
+
+    def test_anchor_tracks_rectangle_top_center_when_moved(self):
+        # The anchor mirrors the text overlay: it stays top-centre above the
+        # rectangle as the overlay moves, without clamping (which would push the
+        # bubble into the rectangle for top-positioned overlays).
+        self.ov.set_overlays([ImageGeom(x=0.3, y=0.4, width=0.5, aspect=1.0)], 0)
+        geom = self.ov._overlays[0]
+        rect = self.ov._overlay_rect(geom)
+        a = self.ov._anchor_point(geom)
+        self.assertAlmostEqual(a.x(), rect.center().x(), places=6)
+        self.assertAlmostEqual(a.y(), rect.top() - _ANCHOR_OFFSET, places=6)
+
+    def test_corner_handle_still_wins_over_anchor(self):
+        # SE corner press must resize, not begin an anchor/body move.
+        _press(self.ov, (300, 250))
+        _move(self.ov, (340, 290))
+        _release(self.ov, (340, 290))
+        self.assertTrue(self.resized, "corner still resizes")
+        self.assertFalse(self.moved, "corner does not move")
 
     def test_click_selects_topmost(self):
         self.ov.set_overlays(

@@ -34,6 +34,10 @@ from PySide6.QtWidgets import QWidget
 _HANDLE_SIZE = 9
 _HANDLE_HIT = 14
 _MIN_WIDTH_PX = 12  # minimum rendered overlay width, in base-image pixels
+# Top move anchor, mirroring the text overlay's bubble spacing/size.
+_ANCHOR_OFFSET = 26  # gap above the selection rectangle
+_ANCHOR_RADIUS = 6   # drawn bubble radius
+_ANCHOR_HIT = 14     # click tolerance radius
 
 _ACCENT = "#5fb4ff"
 _ACCENT_ON = "#0b1018"
@@ -155,6 +159,24 @@ class ImageOverlay(QWidget):
                 return name
         return ""
 
+    def _anchor_point(self, geom: ImageGeom) -> QPointF:
+        rect = self._overlay_rect(geom)
+        if rect.isEmpty():
+            return QPointF()
+        # Top-centre above the selection rectangle, mirroring the text overlay's
+        # bubble. Intentionally not clamped: the anchor tracks the rectangle even
+        # when the (unclamped) overlay is dragged partly off-canvas, and the
+        # overlay body remains draggable as the always-available move affordance.
+        return QPointF(rect.center().x(), rect.top() - _ANCHOR_OFFSET)
+
+    def _hit_anchor(self, geom: ImageGeom, p: QPointF) -> bool:
+        a = self._anchor_point(geom)
+        if a.isNull():
+            return False
+        dx = p.x() - a.x()
+        dy = p.y() - a.y()
+        return dx * dx + dy * dy <= _ANCHOR_HIT * _ANCHOR_HIT
+
     # -- mouse ---------------------------------------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -162,11 +184,18 @@ class ImageOverlay(QWidget):
             super().mousePressEvent(event)
             return
         p = event.position()
-        # Corner handles only respond for the already-selected overlay.
+        # Hit-test priority: corner handles, then top move anchor, then body,
+        # then empty space. Handles and the anchor only respond for the
+        # already-selected overlay.
         if 0 <= self._selected < len(self._overlays):
             geom = self._overlays[self._selected]
             if self._hit_handle(geom, p):
                 self._begin_resize(self._selected, p)
+                event.accept()
+                return
+            if self._hit_anchor(geom, p):
+                # The anchor uses the same free-move gesture as body dragging.
+                self._begin_move(self._selected, p)
                 event.accept()
                 return
         index = self._hit_overlay(p)
@@ -207,12 +236,16 @@ class ImageOverlay(QWidget):
 
     def _update_hover(self, p: QPointF) -> None:
         if 0 <= self._selected < len(self._overlays):
-            handle = self._hit_handle(self._overlays[self._selected], p)
+            geom = self._overlays[self._selected]
+            handle = self._hit_handle(geom, p)
             if handle in ("tl", "br"):
                 self.setCursor(Qt.SizeFDiagCursor)
                 return
             if handle in ("tr", "bl"):
                 self.setCursor(Qt.SizeBDiagCursor)
+                return
+            if self._hit_anchor(geom, p):
+                self.setCursor(Qt.SizeAllCursor)
                 return
         if self._hit_overlay(p) != -1:
             self.setCursor(Qt.SizeAllCursor)
@@ -308,6 +341,19 @@ class ImageOverlay(QWidget):
                 c.x() - _HANDLE_SIZE / 2, c.y() - _HANDLE_SIZE / 2,
                 _HANDLE_SIZE, _HANDLE_SIZE,
             ))
+
+        # Top move anchor: dashed connector from the top edge to a bubble,
+        # mirroring the text overlay's chrome (bubble moves, does not rotate).
+        anchor = self._anchor_point(self._overlays[self._selected])
+        top_mid = QPointF(rect.center().x(), rect.top())
+        line_pen = QPen(QColor(_ACCENT))
+        line_pen.setStyle(Qt.DashLine)
+        painter.setPen(line_pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawLine(top_mid, anchor)
+        painter.setPen(QPen(QColor(_ACCENT_ON), 1))
+        painter.setBrush(QColor(_ACCENT))
+        painter.drawEllipse(anchor, _ANCHOR_RADIUS, _ANCHOR_RADIUS)
 
 
 def _length(p: QPointF) -> float:
