@@ -65,6 +65,13 @@ def _minimal_png_b64() -> str:
     return base64.b64encode(sig + ihdr + idat + iend).decode("ascii")
 
 
+def _png_dims(data: bytes) -> "tuple[int, int]":
+    """Return (width, height) from a PNG's IHDR chunk (bytes 16-24)."""
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+    width, height = struct.unpack(">II", data[16:24])
+    return width, height
+
+
 def _http_post_json(url: str, payload: dict, timeout: int = 5):
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -121,6 +128,13 @@ def main() -> None:
             "COVE_NEXUS_SOCKET": sock_path,
             "COVE_NEXUS_RUN_ID": RUN_ID,
             "COVE_NEXUS_PROTOCOL_VERSION": "1",
+            # This smoke fires dozens of /render requests back-to-back to
+            # exercise validation paths. The production token-bucket limiter
+            # (10 burst, 4/sec) would otherwise return 429 mid-run and make
+            # the assertions nondeterministic. Raise the limiter for the child
+            # only; production defaults are unchanged when these are unset.
+            "COVE_NEXUS_RENDER_RATE_CAPACITY": "100000",
+            "COVE_NEXUS_RENDER_RATE_REFILL": "100000",
         }
 
         proc = subprocess.Popen(
@@ -770,8 +784,27 @@ def main() -> None:
         assert modern_png[:4] == b"\x89PNG", \
             f"/render style=modern: expected PNG magic, got {modern_png[:4]!r}"
         assert len(modern_png) > 0, "/render style=modern: empty PNG body"
+        # Prove the modern path actually ran and was NOT silently downgraded to
+        # classic: _render_modern prepends a white caption band, so the output
+        # is taller than the 1x1 source. Classic burns text onto the same
+        # canvas and preserves the source dimensions. A taller-than-source
+        # output is therefore positive evidence the modern branch executed.
+        m_w, m_h = _png_dims(modern_png)
+        assert m_w >= 1 and m_h > 1, \
+            f"/render style=modern: expected caption band (h>1), got {m_w}x{m_h}"
+        # Contrast: the same 1x1 source through classic keeps its dimensions.
+        _, data_classic_dims = _http_post_json(render_url, {
+            "image_b64": _minimal_png_b64(),
+            "style": "classic",
+            "top": "HELLO",
+            "bottom": "WORLD",
+        })
+        c_w, c_h = _png_dims(base64.b64decode(data_classic_dims["preview_b64"]))
+        assert m_h > c_h, \
+            f"/render modern band did not add height: modern {m_w}x{m_h} " \
+            f"vs classic {c_w}x{c_h}"
         print(f"  /render style=modern caption='smoke caption' → 200 PNG OK "
-              f"({len(modern_png)} bytes)")
+              f"({len(modern_png)} bytes, {m_w}x{m_h} vs classic {c_w}x{c_h})")
 
         # Modern with empty caption — PIL renderer returns the source image
         # unchanged when caption is blank; still must return a valid PNG.

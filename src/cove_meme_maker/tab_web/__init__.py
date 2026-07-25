@@ -16,6 +16,7 @@ import html
 import io
 import json
 import math
+import os
 import pathlib
 import re
 import signal
@@ -90,7 +91,33 @@ class _RenderRateLimiter:
             return False
 
 
-_render_rate_limiter = _RenderRateLimiter()
+def _rate_limit_params() -> "tuple[float, float]":
+    """Return the (capacity, refill_rate) for the /render token bucket.
+
+    Production defaults (10 burst, 4 tokens/sec) are used unless overridden
+    via env. The overrides exist so a test harness driving a fast burst of
+    /render requests (e.g. scripts/smoke_tab_web.py) can remove rate limiting
+    as a source of nondeterministic 429s without changing production behaviour
+    (with neither env var set the values are byte-identical to the defaults).
+    A non-positive or unparseable override falls back to the default.
+    """
+    def _positive(name: str, default: float) -> float:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            v = float(raw)
+        except ValueError:
+            return default
+        return v if v > 0.0 else default
+
+    return (
+        _positive("COVE_NEXUS_RENDER_RATE_CAPACITY", 10.0),
+        _positive("COVE_NEXUS_RENDER_RATE_REFILL", 4.0),
+    )
+
+
+_render_rate_limiter = _RenderRateLimiter(*_rate_limit_params())
 
 # ---------------------------------------------------------------------------
 # Template registry
