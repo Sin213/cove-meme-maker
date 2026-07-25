@@ -60,19 +60,63 @@ jobs:
           chmod +x scripts/build-release.sh
           bash scripts/build-release.sh
 
-      - name: Upload AppImage
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-appimage
-          path: release/*.AppImage
-          if-no-files-found: error
+      - name: Packaged tab-web smoke (AppImage)
+        run: |
+          set -euo pipefail
+          APPIMAGE="release/Cove-Meme-Maker-${VERSION}-x86_64.AppImage"
+          test -s "$APPIMAGE"
+          chmod +x "$APPIMAGE"
+          # AppImages need FUSE to self-mount. Hosted runners normally provide
+          # /dev/fuse; if they ever stop, fall back to the AppImage runtime's
+          # own extract-and-run mode rather than skipping the smoke.
+          if [ ! -e /dev/fuse ]; then
+            echo "No /dev/fuse - using AppImage extract-and-run for this smoke"
+            export APPIMAGE_EXTRACT_AND_RUN=1
+          fi
+          python scripts/smoke_tab_web.py --exe "$APPIMAGE"
 
-      - name: Upload .deb
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-deb
-          path: release/*.deb
-          if-no-files-found: error
+      - name: Validate .deb (contents, install, smoke, remove)
+        run: |
+          set -euo pipefail
+          DEB="release/cove-meme-maker_${VERSION}_amd64.deb"
+          test -s "$DEB"
+
+          echo "==> Package metadata"
+          dpkg-deb -I "$DEB"
+
+          echo "==> Package contents"
+          dpkg-deb -c "$DEB" > /tmp/deb-contents.txt
+          for want in \
+            usr/lib/cove-meme-maker/cove-meme-maker \
+            usr/bin/cove-meme-maker \
+            usr/share/applications/cove-meme-maker.desktop \
+            usr/share/icons/hicolor/256x256/apps/cove-meme-maker.png ; do
+            grep -q "$want" /tmp/deb-contents.txt || {
+              echo "missing from .deb: $want"; exit 1; }
+            echo "    $want OK"
+          done
+
+          # Remove the package even if the smoke below fails, so the runner is
+          # never left with a half-validated install.
+          cleanup() { sudo apt-get remove -y cove-meme-maker >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          echo "==> Installing"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "./$DEB"
+          dpkg -s cove-meme-maker | grep -q "Status: install ok installed"
+          INSTALLED="$(command -v cove-meme-maker)"
+          echo "    installed executable: $INSTALLED"
+
+          echo "==> Packaged tab-web smoke (installed .deb)"
+          python scripts/smoke_tab_web.py --exe "$INSTALLED"
+
+          echo "==> Removing"
+          trap - EXIT
+          sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y cove-meme-maker
+          if dpkg -s cove-meme-maker 2>/dev/null | grep -q "Status: install ok installed"; then
+            echo "package still installed after removal"; exit 1
+          fi
+          echo "    removed OK"
 
       - name: Generate SHA256 sidecars
         run: |
@@ -81,7 +125,28 @@ jobs:
             [ -e "$f" ] || continue
             sha256sum "$f" > "$f.sha256"
           done
+          for f in *.AppImage.sha256 *.deb.sha256; do
+            [ -s "$f" ] || { echo "missing or empty sidecar: $f"; exit 1; }
+          done
           ls -lh
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: |
+            release/*.AppImage
+            release/*.AppImage.sha256
+          if-no-files-found: error
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb
+          path: |
+            release/*.deb
+            release/*.deb.sha256
+          if-no-files-found: error
 
       - name: Attach to GitHub Release
         if: github.ref_type == 'tag'
@@ -127,7 +192,7 @@ jobs:
           pip install PySide6 Pillow pyinstaller pytest
 
       - name: Run focused tests
-        run: python -m pytest tests/test_tab_web.py tests/test_updater.py tests/test_packaging_macos.py -q
+        run: python -m pytest tests/test_tab_web.py tests/test_updater.py tests/test_packaging_macos.py tests/test_release_contracts.py -q
 
       - name: Run tab-web smoke (source)
         run: PYTHONPATH=src python scripts/smoke_tab_web.py
@@ -212,19 +277,59 @@ jobs:
         shell: pwsh
         run: .\build.ps1 -Version $env:VERSION
 
-      - name: Upload Setup installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-setup
-          path: release/*-Setup.exe
-          if-no-files-found: error
+      # The tab-web protocol smoke cannot run on Windows: the app connects to
+      # Nexus over AF_UNIX, which CPython does not expose on Windows, and Nexus
+      # only serves that socket on Linux. Windows always takes the Qt desktop
+      # branch, so the packaged smoke here validates that real path instead.
+      - name: Packaged launch smoke (Portable)
+        shell: pwsh
+        run: |
+          .\scripts\smoke_launch_windows.ps1 -Exe "release\cove-meme-maker-${env:VERSION}-Portable.exe"
 
-      - name: Upload Portable exe
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-portable
-          path: release/*-Portable.exe
-          if-no-files-found: error
+      - name: Install, smoke and uninstall Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = "release\cove-meme-maker-${env:VERSION}-Setup.exe"
+          if (-not (Test-Path -LiteralPath $setup)) { throw "Setup not found: $setup" }
+          if ((Get-Item -LiteralPath $setup).Length -le 0) { throw "Setup is empty: $setup" }
+
+          $installDir = Join-Path $env:RUNNER_TEMP ("cmm-setup-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+          Write-Host "==> Installing silently to $installDir"
+          # Inno Setup 6 silent flags (packaging/installer.iss). PrivilegesRequired=lowest,
+          # so no elevation is needed for a per-user install into a temp dir.
+          $p = Start-Process -FilePath (Resolve-Path -LiteralPath $setup).Path -Wait -PassThru -ArgumentList @(
+              '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', "/DIR=$installDir"
+          )
+          if ($p.ExitCode -ne 0) { throw "Installer failed with exit code $($p.ExitCode)" }
+
+          $installedExe = Join-Path $installDir 'cove-meme-maker.exe'
+          if (-not (Test-Path -LiteralPath $installedExe)) {
+              Get-ChildItem -LiteralPath $installDir -ErrorAction SilentlyContinue | Format-Table Name
+              throw "Installed executable not found: $installedExe"
+          }
+          Write-Host "    installed executable: $installedExe"
+
+          try {
+              .\scripts\smoke_launch_windows.ps1 -Exe $installedExe
+          }
+          finally {
+              $uninstaller = Join-Path $installDir 'unins000.exe'
+              if (Test-Path -LiteralPath $uninstaller) {
+                  Write-Host "==> Uninstalling silently"
+                  $u = Start-Process -FilePath $uninstaller -Wait -PassThru -ArgumentList @(
+                      '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+                  )
+                  if ($u.ExitCode -ne 0) { throw "Uninstaller failed with exit code $($u.ExitCode)" }
+                  Write-Host "    uninstalled OK"
+              } else {
+                  throw "Uninstaller not found: $uninstaller"
+              }
+              if (Test-Path -LiteralPath $installedExe) {
+                  throw "Executable still present after uninstall: $installedExe"
+              }
+              Remove-Item -LiteralPath $installDir -Recurse -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Generate SHA256 sidecars
         shell: pwsh
@@ -237,7 +342,30 @@ jobs:
               $line = "$hash  $($f.Name)`n"
               [System.IO.File]::WriteAllText("$($f.FullName).sha256", $line, [System.Text.Encoding]::ASCII)
           }
+          foreach ($f in $files) {
+              $sidecar = "$($f.FullName).sha256"
+              if (-not (Test-Path -LiteralPath $sidecar)) { throw "Missing sidecar: $sidecar" }
+              if ((Get-Item -LiteralPath $sidecar).Length -le 0) { throw "Empty sidecar: $sidecar" }
+          }
           Get-ChildItem | Format-Table Name, Length
+
+      - name: Upload Setup installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-setup
+          path: |
+            release/*-Setup.exe
+            release/*-Setup.exe.sha256
+          if-no-files-found: error
+
+      - name: Upload Portable exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: |
+            release/*-Portable.exe
+            release/*-Portable.exe.sha256
+          if-no-files-found: error
 
       - name: Attach to GitHub Release
         if: github.ref_type == 'tag'
