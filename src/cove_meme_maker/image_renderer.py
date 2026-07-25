@@ -53,6 +53,8 @@ class OverlaySpec:
     x: float = 0.5
     y: float = 0.5
     width: float = 0.3
+    # Clockwise rotation in degrees applied around the overlay centre.
+    rotation: float = 0.0
 
 # ---------------------------------------------------------------------------
 # Module-level singletons
@@ -190,6 +192,20 @@ def _composite_overlays(
         out_h = int(round(out_w * sh / sw))
         if out_w < 1 or out_h < 1:
             continue
+        rot = getattr(ov, "rotation", 0.0) or 0.0
+        if rot % 360.0 != 0.0:
+            # Rotate the source (bounded by the fixed source size, never by the
+            # unclamped overlay.width) and treat the expanded bounding box as the
+            # new source. The canvas scale is preserved, so the following
+            # clip/crop/resize path keeps every allocation bounded to the canvas.
+            # PIL rotates CCW for positive angles; pass -rot for clockwise.
+            scale = out_w / sw
+            src = src.convert("RGBA").rotate(
+                -rot, resample=Image.Resampling.BICUBIC, expand=True
+            )
+            sw, sh = src.size
+            out_w = max(1, int(round(sw * scale)))
+            out_h = max(1, int(round(sh * scale)))
         # Destination rectangle from the normalised centre (unclamped).
         cx = ov.x * bw
         cy = ov.y * bh

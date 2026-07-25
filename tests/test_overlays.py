@@ -128,6 +128,60 @@ class AspectRatioTest(unittest.TestCase):
         self.assertAlmostEqual(h, 50, delta=2)
 
 
+class RotationTest(unittest.TestCase):
+    def test_zero_rotation_is_byte_identical_to_default(self):
+        base = _solid(160, 120, (30, 90, 200))
+        overlay_img = _solid(40, 20, (0, 255, 0, 255), mode="RGBA")
+        without = MemeSpec(
+            style="classic",
+            overlays=(OverlaySpec(image=overlay_img, x=0.5, y=0.5, width=0.4),),
+        )
+        with_zero = replace(
+            without,
+            overlays=(
+                OverlaySpec(image=overlay_img, x=0.5, y=0.5, width=0.4, rotation=0.0),
+            ),
+        )
+        self.assertEqual(render(base, without).tobytes(), render(base, with_zero).tobytes())
+
+    def test_ninety_degree_rotation_swaps_visible_extent(self):
+        base = _solid(200, 200, (255, 255, 255))
+        # Source 40x20 (aspect h/w 0.5); width 0.5 -> unrotated 100x50.
+        overlay_img = _solid(40, 20, (255, 0, 255, 255), mode="RGBA")
+        spec = MemeSpec(
+            style="classic",
+            overlays=(
+                OverlaySpec(image=overlay_img, x=0.5, y=0.5, width=0.5, rotation=90.0),
+            ),
+        )
+        out = render(base, spec)
+        xs, ys = [], []
+        for y in range(200):
+            for x in range(200):
+                if out.getpixel((x, y)) == (255, 0, 255):
+                    xs.append(x)
+                    ys.append(y)
+        self.assertTrue(xs and ys, "rotated overlay should be visible")
+        w = max(xs) - min(xs) + 1
+        h = max(ys) - min(ys) + 1
+        # Rotated 90 deg: the 100-wide extent becomes vertical, 50 becomes horizontal.
+        self.assertAlmostEqual(w, 50, delta=3)
+        self.assertAlmostEqual(h, 100, delta=3)
+
+    def test_rotation_stays_centered(self):
+        base = _solid(200, 200, (255, 255, 255))
+        overlay_img = _solid(40, 40, (10, 60, 220, 255), mode="RGBA")
+        spec = MemeSpec(
+            style="classic",
+            overlays=(
+                OverlaySpec(image=overlay_img, x=0.5, y=0.5, width=0.4, rotation=37.0),
+            ),
+        )
+        out = render(base, spec)
+        # Pivot is the overlay centre; the centre pixel stays the overlay colour.
+        self.assertEqual(out.getpixel((100, 100)), (10, 60, 220))
+
+
 class ClassicPlacementTest(unittest.TestCase):
     def test_overlay_appears_at_base_center(self):
         base = _solid(120, 120, (255, 255, 255))

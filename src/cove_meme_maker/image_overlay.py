@@ -7,18 +7,24 @@ chain::
     └── ImageOverlay
         └── TextOverlay
 
-The text overlay receives mouse input first; when it ignores empty space the
-event propagates to this widget, which hit-tests image overlays topmost-first.
-When this widget also ignores empty space the event reaches ``PreviewLabel``.
+The text overlay is the topmost widget and receives mouse input first. When it
+ignores an event (empty space) the *press* propagates down to this widget, which
+hit-tests image overlays topmost-first. Hover moves and drag moves are NOT
+propagated by Qt, so while the text overlay is on top the host installs an event
+filter on it that forwards in-flight gesture moves/releases here and drives the
+hover cursor (see ``MainWindow._route_image_overlay_event``). This mirrors the
+proven text-overlay interaction (which works purely because it is topmost) and
+avoids a ``QWidget.grabMouse()`` — unsupported for non-popups on Wayland.
 
 Canonical overlay geometry is normalised relative to the *base-image region*
 (post-crop). The host maps that region to widget coordinates and hands us the
 resulting rectangle via :meth:`set_base_rect`; we translate mouse drags into
-``overlayMoved`` / ``overlayResized`` signals and never store widget-pixel
-coordinates as canonical state.
+``overlayMoved`` / ``overlayResized`` / ``overlayRotated`` signals and never
+store widget-pixel coordinates as canonical state.
 
-The gesture model mirrors ``TextOverlay`` without importing its internals:
-drag the body to MOVE, drag a corner handle to RESIZE (aspect-preserving).
+The gesture model mirrors ``TextOverlay`` without importing its internals: drag
+the body to MOVE, drag a corner handle to RESIZE (aspect-preserving), drag the
+top bubble to ROTATE (around the overlay centre).
 """
 
 from __future__ import annotations
@@ -27,17 +33,25 @@ import math
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPen
+from PySide6.QtGui import (
+    QColor,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPen,
+    QPolygonF,
+    QTransform,
+)
 from PySide6.QtWidgets import QWidget
 
 
 _HANDLE_SIZE = 9
 _HANDLE_HIT = 14
 _MIN_WIDTH_PX = 12  # minimum rendered overlay width, in base-image pixels
-# Top move anchor, mirroring the text overlay's bubble spacing/size.
-_ANCHOR_OFFSET = 26  # gap above the selection rectangle
-_ANCHOR_RADIUS = 6   # drawn bubble radius
-_ANCHOR_HIT = 14     # click tolerance radius
+# Top rotate handle, mirroring the text overlay's bubble spacing/size.
+_ROTATE_OFFSET = 26  # gap above the selection rectangle
+_ROTATE_RADIUS = 6   # drawn bubble radius
+_ROTATE_HIT = 14     # click tolerance radius
 
 _ACCENT = "#5fb4ff"
 _ACCENT_ON = "#0b1018"
@@ -51,16 +65,19 @@ class ImageGeom:
     y: float = 0.5      # normalised centre Y
     width: float = 0.3  # width as a fraction of base width
     aspect: float = 1.0  # source height / source width
+    rotation: float = 0.0  # clockwise degrees around the overlay centre
 
 
 @dataclass
 class _DragState:
     index: int = -1
-    mode: str = ""  # "move" | "resize"
+    mode: str = ""  # "move" | "resize" | "rotate"
     grab_offset: QPointF = field(default_factory=QPointF)
     resize_anchor: QPointF = field(default_factory=QPointF)
     resize_start_dist: float = 1.0
     resize_start_width: float = 0.3
+    rotate_start_cursor_deg: float = 0.0
+    rotate_start_rotation: float = 0.0
 
 
 class ImageOverlay(QWidget):
@@ -69,6 +86,7 @@ class ImageOverlay(QWidget):
     overlaySelected = Signal(int)          # index, or -1 for none
     overlayMoved = Signal(int, float, float)  # index, x_norm, y_norm
     overlayResized = Signal(int, float)    # index, width_norm
+    overlayRotated = Signal(int, float)    # index, degrees (clockwise)
     overlayDeleted = Signal(int)           # index
     dragFinished = Signal()                # mouse release after a drag
 
@@ -108,6 +126,10 @@ class ImageOverlay(QWidget):
             self._selected = -1
             self.update()
 
+    def is_dragging(self) -> bool:
+        """True while a move/resize/rotate gesture is in progress."""
+        return bool(self._drag.mode)
+
     # -- coordinate helpers --------------------------------------------
 
     def _min_width_norm(self) -> float:
@@ -127,6 +149,7 @@ class ImageOverlay(QWidget):
         return (p.x() - d.x()) / d.width(), (p.y() - d.y()) / d.height()
 
     def _overlay_rect(self, geom: ImageGeom) -> QRectF:
+        """Axis-aligned (unrotated) bounding rectangle in widget coords."""
         d = self._base_rect
         if d.width() == 0 or d.height() == 0:
             return QRectF()
@@ -135,21 +158,48 @@ class ImageOverlay(QWidget):
         c = self._norm_to_widget(geom.x, geom.y)
         return QRectF(c.x() - w / 2, c.y() - h / 2, w, h)
 
+    def _rotation_transform(self, geom: ImageGeom) -> QTransform:
+        c = self._overlay_rect(geom).center()
+        t = QTransform()
+        t.translate(c.x(), c.y())
+        t.rotate(geom.rotation)
+        t.translate(-c.x(), -c.y())
+        return t
+
+    def _overlay_polygon(self, geom: ImageGeom) -> QPolygonF:
+        rect = self._overlay_rect(geom)
+        if rect.isEmpty():
+            return QPolygonF()
+        return self._rotation_transform(geom).map(QPolygonF([
+            rect.topLeft(), rect.topRight(),
+            rect.bottomRight(), rect.bottomLeft(),
+        ]))
+
     def _handle_centers(self, geom: ImageGeom) -> dict[str, QPointF]:
         rect = self._overlay_rect(geom)
         if rect.isEmpty():
             return {}
-        return {
+        corners = {
             "tl": QPointF(rect.left(), rect.top()),
             "tr": QPointF(rect.right(), rect.top()),
             "bl": QPointF(rect.left(), rect.bottom()),
             "br": QPointF(rect.right(), rect.bottom()),
         }
+        t = self._rotation_transform(geom)
+        return {k: t.map(v) for k, v in corners.items()}
+
+    def _rotate_handle(self, geom: ImageGeom) -> QPointF:
+        rect = self._overlay_rect(geom)
+        if rect.isEmpty():
+            return QPointF()
+        pre = QPointF(rect.center().x(), rect.top() - _ROTATE_OFFSET)
+        return self._rotation_transform(geom).map(pre)
 
     def _hit_overlay(self, p: QPointF) -> int:
         # Topmost-first: later overlays render on top, so iterate in reverse.
         for i in range(len(self._overlays) - 1, -1, -1):
-            if self._overlay_rect(self._overlays[i]).contains(p):
+            poly = self._overlay_polygon(self._overlays[i])
+            if not poly.isEmpty() and poly.containsPoint(p, Qt.OddEvenFill):
                 return i
         return -1
 
@@ -159,23 +209,43 @@ class ImageOverlay(QWidget):
                 return name
         return ""
 
-    def _anchor_point(self, geom: ImageGeom) -> QPointF:
-        rect = self._overlay_rect(geom)
-        if rect.isEmpty():
-            return QPointF()
-        # Top-centre above the selection rectangle, mirroring the text overlay's
-        # bubble. Intentionally not clamped: the anchor tracks the rectangle even
-        # when the (unclamped) overlay is dragged partly off-canvas, and the
-        # overlay body remains draggable as the always-available move affordance.
-        return QPointF(rect.center().x(), rect.top() - _ANCHOR_OFFSET)
-
-    def _hit_anchor(self, geom: ImageGeom, p: QPointF) -> bool:
-        a = self._anchor_point(geom)
-        if a.isNull():
+    def _hit_rotate(self, geom: ImageGeom, p: QPointF) -> bool:
+        rh = self._rotate_handle(geom)
+        if rh.isNull():
             return False
-        dx = p.x() - a.x()
-        dy = p.y() - a.y()
-        return dx * dx + dy * dy <= _ANCHOR_HIT * _ANCHOR_HIT
+        dx = p.x() - rh.x()
+        dy = p.y() - rh.y()
+        return dx * dx + dy * dy <= _ROTATE_HIT * _ROTATE_HIT
+
+    def _angle_to(self, geom: ImageGeom, p: QPointF) -> float:
+        c = self._overlay_rect(geom).center()
+        return math.degrees(math.atan2(p.y() - c.y(), p.x() - c.x()))
+
+    # -- host-facing hit predicates (used by the event-filter router) --
+
+    def wants_press(self, p: QPointF) -> bool:
+        """True when a left-press at ``p`` is an image-overlay interaction.
+
+        The host routes the press here only when this returns True; otherwise it
+        lets the text overlay (and its ignore-propagation) run unchanged.
+        """
+        if 0 <= self._selected < len(self._overlays):
+            geom = self._overlays[self._selected]
+            if self._hit_rotate(geom, p) or self._hit_handle(geom, p):
+                return True
+        return self._hit_overlay(p) != -1
+
+    def cursor_for(self, p: QPointF):
+        """Cursor shape for hovering ``p``, or ``None`` when not over an overlay."""
+        if 0 <= self._selected < len(self._overlays):
+            geom = self._overlays[self._selected]
+            if self._hit_rotate(geom, p):
+                return Qt.CrossCursor
+            if self._hit_handle(geom, p):
+                return Qt.SizeFDiagCursor
+        if self._hit_overlay(p) != -1:
+            return Qt.SizeAllCursor
+        return None
 
     # -- mouse ---------------------------------------------------------
 
@@ -184,18 +254,17 @@ class ImageOverlay(QWidget):
             super().mousePressEvent(event)
             return
         p = event.position()
-        # Hit-test priority: corner handles, then top move anchor, then body,
-        # then empty space. Handles and the anchor only respond for the
-        # already-selected overlay.
+        # Hit-test priority: rotate handle, then corner handles, then body,
+        # then empty space. The rotate handle and corner handles only respond
+        # for the already-selected overlay.
         if 0 <= self._selected < len(self._overlays):
             geom = self._overlays[self._selected]
-            if self._hit_handle(geom, p):
-                self._begin_resize(self._selected, p)
+            if self._hit_rotate(geom, p):
+                self._begin_rotate(self._selected, p)
                 event.accept()
                 return
-            if self._hit_anchor(geom, p):
-                # The anchor uses the same free-move gesture as body dragging.
-                self._begin_move(self._selected, p)
+            if self._hit_handle(geom, p):
+                self._begin_resize(self._selected, p)
                 event.accept()
                 return
         index = self._hit_overlay(p)
@@ -223,11 +292,12 @@ class ImageOverlay(QWidget):
             self._do_move(p)
         elif self._drag.mode == "resize":
             self._do_resize(p)
+        elif self._drag.mode == "rotate":
+            self._do_rotate(p)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton and self._drag.mode:
             self._drag = _DragState()
-            self._release_mouse()
             self._update_hover(event.position())
             self.dragFinished.emit()
             event.accept()
@@ -235,22 +305,11 @@ class ImageOverlay(QWidget):
         super().mouseReleaseEvent(event)
 
     def _update_hover(self, p: QPointF) -> None:
-        if 0 <= self._selected < len(self._overlays):
-            geom = self._overlays[self._selected]
-            handle = self._hit_handle(geom, p)
-            if handle in ("tl", "br"):
-                self.setCursor(Qt.SizeFDiagCursor)
-                return
-            if handle in ("tr", "bl"):
-                self.setCursor(Qt.SizeBDiagCursor)
-                return
-            if self._hit_anchor(geom, p):
-                self.setCursor(Qt.SizeAllCursor)
-                return
-        if self._hit_overlay(p) != -1:
-            self.setCursor(Qt.SizeAllCursor)
-        else:
+        cur = self.cursor_for(p)
+        if cur is None:
             self.unsetCursor()
+        else:
+            self.setCursor(cur)
 
     # -- gesture starters ---------------------------------------------
 
@@ -259,7 +318,6 @@ class ImageOverlay(QWidget):
         c = self._norm_to_widget(geom.x, geom.y)
         self._drag = _DragState(index=index, mode="move", grab_offset=p - c)
         self.setCursor(Qt.SizeAllCursor)
-        self._grab_mouse()
 
     def _begin_resize(self, index: int, p: QPointF) -> None:
         geom = self._overlays[index]
@@ -271,19 +329,16 @@ class ImageOverlay(QWidget):
             resize_start_dist=dist,
             resize_start_width=geom.width,
         )
-        self._grab_mouse()
+        self.setCursor(Qt.SizeFDiagCursor)
 
-    def _grab_mouse(self) -> None:
-        # The topmost sibling (TextOverlay) receives the initial press and holds
-        # the implicit mouse grab; without an explicit grab here the follow-up
-        # move/release events never reach this widget and drag/resize appear
-        # dead. Take the grab for the duration of the gesture.
-        if QWidget.mouseGrabber() is not self:
-            self.grabMouse()
-
-    def _release_mouse(self) -> None:
-        if QWidget.mouseGrabber() is self:
-            self.releaseMouse()
+    def _begin_rotate(self, index: int, p: QPointF) -> None:
+        geom = self._overlays[index]
+        self._drag = _DragState(
+            index=index, mode="rotate",
+            rotate_start_cursor_deg=self._angle_to(geom, p),
+            rotate_start_rotation=geom.rotation,
+        )
+        self.setCursor(Qt.CrossCursor)
 
     # -- gesture handlers ---------------------------------------------
 
@@ -298,10 +353,18 @@ class ImageOverlay(QWidget):
         new_width = max(self._min_width_norm(), self._drag.resize_start_width * scale)
         self.overlayResized.emit(self._drag.index, new_width)
 
+    def _do_rotate(self, p: QPointF) -> None:
+        geom = self._overlays[self._drag.index]
+        cur = self._angle_to(geom, p)
+        delta = cur - self._drag.rotate_start_cursor_deg
+        new_rot = (self._drag.rotate_start_rotation + delta) % 360
+        if new_rot > 180:
+            new_rot -= 360
+        self.overlayRotated.emit(self._drag.index, new_rot)
+
     def hideEvent(self, event) -> None:  # noqa: ANN001
-        # Never leave the app stuck with mouse capture if we are hidden mid-drag.
+        # Never leave a half-finished gesture active if we are hidden mid-drag.
         self._drag = _DragState()
-        self._release_mouse()
         super().hideEvent(event)
 
     # -- keyboard ------------------------------------------------------
@@ -321,8 +384,9 @@ class ImageOverlay(QWidget):
     def paintEvent(self, _event) -> None:  # noqa: ANN001
         if not (0 <= self._selected < len(self._overlays)):
             return
-        rect = self._overlay_rect(self._overlays[self._selected])
-        if rect.isEmpty():
+        geom = self._overlays[self._selected]
+        poly = self._overlay_polygon(geom)
+        if poly.isEmpty():
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -332,28 +396,31 @@ class ImageOverlay(QWidget):
         pen.setStyle(Qt.DashLine)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
-        painter.drawRect(rect)
+        painter.drawPolygon(poly)
 
         painter.setPen(QPen(QColor(_ACCENT_ON), 1))
         painter.setBrush(QColor(_ACCENT))
-        for c in self._handle_centers(self._overlays[self._selected]).values():
+        for c in self._handle_centers(geom).values():
             painter.drawRect(QRectF(
                 c.x() - _HANDLE_SIZE / 2, c.y() - _HANDLE_SIZE / 2,
                 _HANDLE_SIZE, _HANDLE_SIZE,
             ))
 
-        # Top move anchor: dashed connector from the top edge to a bubble,
-        # mirroring the text overlay's chrome (bubble moves, does not rotate).
-        anchor = self._anchor_point(self._overlays[self._selected])
-        top_mid = QPointF(rect.center().x(), rect.top())
+        # Top rotate handle: dashed connector from the (rotated) top edge to the
+        # bubble, mirroring the text overlay's chrome.
+        rh = self._rotate_handle(geom)
+        rect = self._overlay_rect(geom)
+        top_mid = self._rotation_transform(geom).map(
+            QPointF(rect.center().x(), rect.top())
+        )
         line_pen = QPen(QColor(_ACCENT))
         line_pen.setStyle(Qt.DashLine)
         painter.setPen(line_pen)
         painter.setBrush(Qt.NoBrush)
-        painter.drawLine(top_mid, anchor)
+        painter.drawLine(top_mid, rh)
         painter.setPen(QPen(QColor(_ACCENT_ON), 1))
         painter.setBrush(QColor(_ACCENT))
-        painter.drawEllipse(anchor, _ANCHOR_RADIUS, _ANCHOR_RADIUS)
+        painter.drawEllipse(rh, _ROTATE_RADIUS, _ROTATE_RADIUS)
 
 
 def _length(p: QPointF) -> float:

@@ -297,6 +297,7 @@ class _OverlayState:
     x: float
     y: float
     width: float
+    rotation: float = 0.0
 
 
 class PreviewLabel(QLabel):
@@ -510,6 +511,7 @@ class MainWindow(QMainWindow):
         self.image_overlay.overlaySelected.connect(self._on_overlay_selected)
         self.image_overlay.overlayMoved.connect(self._on_overlay_moved)
         self.image_overlay.overlayResized.connect(self._on_overlay_resized)
+        self.image_overlay.overlayRotated.connect(self._on_overlay_rotated)
         self.image_overlay.overlayDeleted.connect(self._on_overlay_deleted)
         self.image_overlay.dragFinished.connect(self._refresh_preview)
         self.image_overlay.hide()
@@ -522,6 +524,12 @@ class MainWindow(QMainWindow):
         self.text_overlay.hide()
 
         self.preview_label.installEventFilter(self)
+        # The text overlay is the topmost widget and receives hover/drag moves
+        # first. Qt only propagates *ignored presses* to the image overlay
+        # beneath it, not hover or in-flight drag moves, so we filter the text
+        # overlay's mouse events and route the image gestures through. This
+        # replaces a QWidget.grabMouse() (unsupported for non-popups on Wayland).
+        self.text_overlay.installEventFilter(self)
 
         canvas_layout.addWidget(self.stage, stretch=1)
 
@@ -878,6 +886,7 @@ class MainWindow(QMainWindow):
                     x=overlay.x,
                     y=overlay.y,
                     width=overlay.width,
+                    rotation=overlay.rotation,
                 )
                 for overlay in self._overlays
             ),
@@ -949,6 +958,7 @@ class MainWindow(QMainWindow):
             ImageGeom(
                 x=ov.x, y=ov.y, width=ov.width,
                 aspect=(ov.image.height / ov.image.width if ov.image.width else 1.0),
+                rotation=ov.rotation,
             )
             for ov in self._overlays
         ]
@@ -992,7 +1002,53 @@ class MainWindow(QMainWindow):
             )
             if self._preview_base is not None:
                 self._refresh_preview()
+        elif obj is self.text_overlay and self._route_image_overlay_event(event):
+            return True
         return super().eventFilter(obj, event)
+
+    def _route_image_overlay_event(self, event) -> bool:  # noqa: ANN001
+        """Route the topmost text overlay's mouse events to the image overlay.
+
+        The text overlay and image overlay share identical geometry, so widget
+        coordinates map 1:1. We only claim an event when it belongs to an image
+        gesture; otherwise the text overlay (and its ignore-propagation, which
+        already selects/deselects image overlays on press) behaves unchanged.
+
+        Returns True when the event was consumed on the image overlay's behalf.
+        """
+        io = self.image_overlay
+        if self._preview_base is None or not io.isVisible():
+            return False
+        et = event.type()
+        if et == QEvent.MouseMove:
+            if io.is_dragging():
+                self._forward_mouse_event(io, event)
+                return True
+            # Hover: only override the cursor while no text block is being edited
+            # and the pointer is actually over an image overlay/handle.
+            if self.text_overlay.active_block():
+                return False
+            cur = io.cursor_for(event.position())
+            if cur is None:
+                return False
+            self.text_overlay.setCursor(cur)
+            return True
+        if et == QEvent.MouseButtonRelease and io.is_dragging():
+            self._forward_mouse_event(io, event)
+            return True
+        return False
+
+    @staticmethod
+    def _forward_mouse_event(target, event) -> None:  # noqa: ANN001
+        clone = QMouseEvent(
+            event.type(),
+            event.position(),
+            event.globalPosition(),
+            event.button(),
+            event.buttons(),
+            event.modifiers(),
+        )
+        QApplication.sendEvent(target, clone)
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001
         super().resizeEvent(event)
@@ -1113,6 +1169,11 @@ class MainWindow(QMainWindow):
     def _on_overlay_resized(self, index: int, width: float) -> None:
         if 0 <= index < len(self._overlays):
             self._overlays[index].width = width
+            self._refresh_preview()
+
+    def _on_overlay_rotated(self, index: int, deg: float) -> None:
+        if 0 <= index < len(self._overlays):
+            self._overlays[index].rotation = deg
             self._refresh_preview()
 
     def _on_overlay_deleted(self, index: int) -> None:
