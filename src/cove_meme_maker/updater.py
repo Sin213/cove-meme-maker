@@ -6,8 +6,10 @@ user gets a dialog and chooses whether to install.
 
 AppImage installs can do the download-and-swap end-to-end (the kernel keeps
 the running mmap alive across an overwrite, so replacing the file on disk
-and re-execing works). Windows Setup, Portable, and .deb just open the
-GitHub release page — the user runs the installer themselves.
+and re-execing works). Windows Setup, Portable, .deb, and macOS just open the
+GitHub release page — the user runs the installer themselves. The macOS build
+is Apple-Silicon-only and unsigned, so it is recognized (to report that an
+update exists) but never downloaded, mounted, extracted, or swapped.
 
 Usage from a MainWindow:
 
@@ -28,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -120,14 +123,42 @@ def bundle_kind() -> str:
         if "Program Files" in exe_str or r"AppData\Local" in exe_str:
             return "win-setup"
         return "win-portable"
+    if sys.platform == "darwin":
+        # A source checkout on macOS is still "source" - only a frozen .app
+        # bundle corresponds to a shipped macOS release asset.
+        return "macos" if getattr(sys, "frozen", False) else "source"
     if sys.platform.startswith("linux") and getattr(sys, "frozen", False):
         return "deb"
     return "source"
 
 
+_MACOS_TOKENS = frozenset({"macos", "darwin"})
+_ARM64_TOKENS = frozenset({"arm64", "aarch64"})
+
+
+def _is_macos_arm64(name: str, suffix: str) -> bool:
+    """True when `name` is the macOS/Apple-Silicon release asset with `suffix`.
+
+    Release pages carry several unrelated archives (source-code zips,
+    screenshot bundles, the Windows zip), so a `.zip` extension alone proves
+    nothing. Require an explicit macOS token *and* an explicit arm64 token,
+    matched as whole separator-delimited words so `macos-x86_64` and
+    `macos-universal2` (not part of this release) are rejected.
+    """
+    if not name.endswith(suffix):
+        return False
+    words = set(re.split(r"[^a-z0-9]+", name[: -len(suffix)]))
+    return bool(words & _MACOS_TOKENS) and bool(words & _ARM64_TOKENS)
+
+
 def preferred_asset(kind: str, assets: list[dict]) -> dict | None:
     def first_match(predicate) -> dict | None:
-        return next((a for a in assets if predicate(a["name"].lower())), None)
+        # Tolerate a malformed release payload with a nameless asset rather
+        # than crashing the startup update check.
+        return next(
+            (a for a in assets if predicate((a.get("name") or "").lower())),
+            None,
+        )
 
     if kind == "appimage":
         return first_match(
@@ -145,6 +176,13 @@ def preferred_asset(kind: str, assets: list[dict]) -> dict | None:
         return first_match(
             lambda n: "portable" in n and n.endswith(".exe"),
         )
+    if kind == "macos":
+        # ZIP is the primary experimental artifact; the DMG is a secondary
+        # recognized asset. Neither is auto-installed - see _prompt.
+        return (
+            first_match(lambda n: _is_macos_arm64(n, ".zip"))
+            or first_match(lambda n: _is_macos_arm64(n, ".dmg"))
+        )
     return None
 
 
@@ -157,7 +195,11 @@ def matching_sha256_asset(asset_name: str, assets: list[dict]) -> dict | None:
     rather than silently skipping the check.
     """
     target = f"{asset_name}.sha256".lower()
-    return next((a for a in assets if a["name"].lower() == target), None)
+    # Same nameless-asset tolerance as preferred_asset: this scan walks the
+    # same list, so a malformed entry must not crash the update check.
+    return next(
+        (a for a in assets if (a.get("name") or "").lower() == target), None,
+    )
 
 
 def _parse_sha256_sidecar(text: str) -> str:
