@@ -21,16 +21,10 @@ DISPLAY_NAME="Cove Meme Maker"
 SLUG="${DISPLAY_NAME// /-}"
 
 # Canonical version lives in the package; VERSION may override it (CI does).
+# Kept on one line with no heredoc: macOS ships bash 3.2, which cannot parse a
+# heredoc inside $( ).
 if [ -z "${VERSION:-}" ]; then
-    VERSION="$(python - <<'PY'
-import pathlib, re
-text = pathlib.Path("src/cove_meme_maker/__init__.py").read_text(encoding="utf-8")
-m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.M)
-if not m:
-    raise SystemExit("could not read __version__ from src/cove_meme_maker/__init__.py")
-print(m.group(1))
-PY
-)"
+    VERSION="$(PYTHONPATH=src python -c 'import cove_meme_maker; print(cove_meme_maker.__version__)')"
 fi
 [ -n "$VERSION" ] || { echo "VERSION is empty"; exit 1; }
 

@@ -141,9 +141,22 @@ class BuildScriptContractTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_version_is_not_hardcoded(self):
-        text = BUILD_SCRIPT.read_text()
-        self.assertNotIn('VERSION:-2.3.0', text)
-        self.assertIn("src/cove_meme_maker/__init__.py", text)
+        code = _script_code(BUILD_SCRIPT)
+        self.assertNotIn('VERSION:-2.3.0', code)
+        self.assertIn("cove_meme_maker.__version__", code)
+
+    def test_no_heredoc_inside_command_substitution(self):
+        """macOS ships bash 3.2, which cannot parse `$( ... <<EOF ... )`.
+
+        bash 5 accepts it, so a Linux `bash -n` passes while the macos-14 job
+        fails with "unexpected EOF while looking for matching `)'". Guard the
+        construct statically instead.
+        """
+        for n, line in enumerate(BUILD_SCRIPT.read_text().splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if "$(" in line and "<<" in line[line.index("$("):]:
+                self.fail(f"heredoc inside $() breaks bash 3.2 at line {n}: {line}")
 
     def test_enforces_arm64_and_uses_ditto(self):
         text = BUILD_SCRIPT.read_text()
