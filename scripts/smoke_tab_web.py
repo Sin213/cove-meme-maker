@@ -20,13 +20,21 @@ Run from the repo root (source):
 
 Run against a packaged executable or AppImage:
   python scripts/smoke_tab_web.py --exe /path/to/Cove-Meme-Maker-x.y.z.AppImage
+
+Run against a macOS .app bundle (point at the binary inside it, not the
+bundle directory - the bundle must not be launched via `open`, which would
+show a desktop window):
+  python scripts/smoke_tab_web.py \
+      --exe "dist/Cove Meme Maker.app/Contents/MacOS/cove-meme-maker"
 """
 import base64
+import contextlib
 import io
 import json
 import os
 import pathlib
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -41,10 +49,35 @@ SRC_DIR = str(REPO_ROOT / "src")
 RUN_ID = "smoke-test-001"
 TIMEOUT = 10
 
+# Unix-domain socket paths are capped by sun_path (104 bytes on macOS, 108 on
+# Linux). macOS's default temp dir is a long per-user path under /var/folders,
+# which can push "<tmpdir>/nexus.sock" over the limit and make bind() fail.
+# Anchor the socket at /tmp instead - short on both platforms.
+SOCKET_BASE = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
+SOCKET_DIR_PREFIX = "cove-smk-"
+SOCKET_FILENAME = "n.sock"
+# Conservative shared bound: the smaller of the two platform sun_path limits.
+SOCKET_PATH_LIMIT = 104
+
 
 def fail(msg: str) -> None:
     print(f"FAIL: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+@contextlib.contextmanager
+def short_socket_path():
+    """Yield a short, unique Unix socket path and remove it afterwards.
+
+    mkdtemp gives a per-run directory so concurrent smoke runs never collide
+    on one shared socket filename. The directory (and the bound socket inside
+    it) is removed on success, failure, timeout and interrupt alike.
+    """
+    tmpdir = tempfile.mkdtemp(prefix=SOCKET_DIR_PREFIX, dir=SOCKET_BASE)
+    try:
+        yield os.path.join(tmpdir, SOCKET_FILENAME)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _minimal_png_b64() -> str:
@@ -112,9 +145,7 @@ def main() -> None:
         python_path = SRC_DIR + (os.pathsep + existing_path if existing_path else "")
         extra_env = {"PYTHONPATH": python_path}
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        sock_path = os.path.join(tmpdir, "nexus.sock")
-
+    with short_socket_path() as sock_path:
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(sock_path)
         listener.listen(1)

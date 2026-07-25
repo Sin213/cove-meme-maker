@@ -97,9 +97,12 @@ jobs:
 
   build-macos:
     needs: resolve-version
-    runs-on: macos-latest
+    # macos-14 is the Apple Silicon (arm64) hosted runner. This release is
+    # arm64-only: no x86_64, no universal2.
+    runs-on: macos-14
     env:
       VERSION: ${{ needs.resolve-version.outputs.version }}
+      APP_EXE: dist/Cove Meme Maker.app/Contents/MacOS/cove-meme-maker
     steps:
       - uses: actions/checkout@v4
 
@@ -109,39 +112,86 @@ jobs:
           python-version: '3.12'
           cache: pip
 
+      - name: Verify runner is Apple Silicon
+        run: |
+          echo "uname -m: $(uname -m)"
+          python -c "import platform; print('platform.machine():', platform.machine())"
+          if [ "$(uname -m)" != "arm64" ]; then
+            echo "Expected an arm64 runner, got $(uname -m)"
+            exit 1
+          fi
+
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install PySide6 Pillow pyinstaller
+          pip install PySide6 Pillow pyinstaller pytest
+
+      - name: Run focused tests
+        run: python -m pytest tests/test_tab_web.py tests/test_updater.py tests/test_packaging_macos.py -q
+
+      - name: Run tab-web smoke (source)
+        run: PYTHONPATH=src python scripts/smoke_tab_web.py
 
       - name: Run macOS build script
         run: |
           chmod +x scripts/build-macos.sh
           bash scripts/build-macos.sh
 
-      - name: Upload DMG
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-dmg
-          path: release/*.dmg
-          if-no-files-found: error
+      - name: Validate .app bundle
+        run: |
+          test -d "dist/Cove Meme Maker.app"
+          test -x "$APP_EXE"
+          lipo -archs "$APP_EXE"
+          [ "$(lipo -archs "$APP_EXE")" = "arm64" ]
+
+      - name: Run tab-web smoke (packaged .app)
+        run: python scripts/smoke_tab_web.py --exe "$APP_EXE"
+
+      - name: Verify artifact names
+        run: |
+          zip="release/Cove-Meme-Maker-${VERSION}-macOS-arm64.zip"
+          dmg="release/Cove-Meme-Maker-${VERSION}-macOS-arm64.dmg"
+          test -s "$zip"
+          test -s "$dmg"
+          case "$zip" in *macOS-arm64.zip) ;; *) echo "bad zip name: $zip"; exit 1 ;; esac
+          ls -lh release
 
       - name: Generate SHA256 sidecars
         run: |
           cd release
-          for f in *.dmg; do
+          for f in *-macOS-arm64.zip *-macOS-arm64.dmg; do
             [ -e "$f" ] || continue
             shasum -a 256 "$f" > "$f.sha256"
           done
           ls -lh
+
+      - name: Upload macOS ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-zip
+          path: |
+            release/*-macOS-arm64.zip
+            release/*-macOS-arm64.zip.sha256
+          if-no-files-found: error
+
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-dmg
+          path: |
+            release/*-macOS-arm64.dmg
+            release/*-macOS-arm64.dmg.sha256
+          if-no-files-found: error
 
       - name: Attach to GitHub Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/*.dmg
-            release/*.dmg.sha256
+            release/*-macOS-arm64.zip
+            release/*-macOS-arm64.zip.sha256
+            release/*-macOS-arm64.dmg
+            release/*-macOS-arm64.dmg.sha256
           body_path: .github/RELEASE_NOTES_v${{ needs.resolve-version.outputs.version }}.md
           fail_on_unmatched_files: true
 

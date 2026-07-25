@@ -57,6 +57,14 @@ exe = EXE(
     upx=False,
     console=False,
     icon=_ICON,
+    # Apple Silicon only. Stated explicitly so the build fails loudly rather
+    # than silently inheriting the runner arch (no x86_64, no universal2).
+    target_arch="arm64",
+    # No Developer ID identity: PyInstaller falls back to ad-hoc signing,
+    # which is what arm64 Mach-O binaries require to run at all. This build
+    # is deliberately not Developer ID signed and not notarized.
+    codesign_identity=None,
+    entitlements_file=None,
 )
 
 coll = COLLECT(
