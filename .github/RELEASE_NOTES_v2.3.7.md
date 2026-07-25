@@ -1,23 +1,40 @@
 ## Cove Meme Maker v2.3.7
 
-**Image overlays + experimental Apple Silicon build** — Multi-image overlays are now movable, resizable and rotatable on the desktop, and macOS gets its first Apple Silicon build alongside a more reliable release pipeline.
+**Image overlays + experimental Apple Silicon build.** Multi-image overlays are now movable, resizable and rotatable on the desktop, and macOS gets its first Apple Silicon build alongside a more reliable release pipeline.
 
 ### What's new
 
 - **Multi-image overlays on the desktop.** Drop several images onto a meme and position each one independently. Overlays share the same Pillow render path as the exported image, so what you arrange is what you get.
 - **Drag, resize and rotate.** Image overlays can be dragged and resized directly on the canvas, moved from a dedicated top anchor, and rotated with the top handle.
 - **Experimental macOS Apple Silicon build.** A native `.app` bundle is now published as a ZIP, with a DMG alongside it. See the limitations below before downloading.
-- **macOS update awareness.** A frozen macOS build now recognizes its own release asset and opens the GitHub release page when a newer version exists. macOS updates are **not** installed automatically — you download and replace the app yourself. Linux and Windows update behavior is unchanged.
+- **macOS update awareness.** A frozen macOS build now recognizes its own release asset and opens the GitHub release page when a newer version exists. macOS updates are **not** installed automatically, so you download and replace the app yourself. Linux and Windows update behavior is unchanged.
 - **Nexus/tab-web reliability.** The embedded tab-web server keeps its `127.0.0.1` binding and pre-Qt startup gate under test, and Modern-style rendering is now verified to route through the caption-band renderer instead of silently falling back to Classic.
 - **Release and packaging reliability.** Checksum sidecars are now generated before artifacts are uploaded, so every published binary ships with its `.sha256`. Linux, Windows and macOS packages are launch-tested in CI before release.
 
-### macOS limitations — read before downloading
+### Changelog
+
+Commits since v2.3.6:
+
+| Commit | Change |
+|---|---|
+| `140244c` | build(release): prepare v2.3.7 release candidate |
+| `34c724a` | fix(macos): make build script parse under bash 3.2 |
+| `27eb6fa` | build(macos): add arm64 packaging and release workflow |
+| `ac8f796` | feat(updater): add macOS release awareness |
+| `7b81709` | test(tab-web): validate Nexus modern rendering |
+| `49ae860` | feat(overlays): rotate image overlays via top handle |
+| `de3951f` | feat(overlays): add top move anchor to image overlays |
+| `d27ab3c` | fix(overlays): enable desktop image dragging and resizing |
+| `3265ccc` | feat(overlays): desktop multi-image overlay support with shared Pillow render path |
+| `3abd843` | docs: use this repo's values in updater docstring example |
+
+### macOS limitations, read before downloading
 
 The macOS build is **experimental** and deliberately narrow in scope:
 
 - **Apple Silicon (arm64) only.** There is no Intel build and no universal2 build.
 - **Not Developer ID signed.** The app is ad-hoc signed only.
-- **Not notarized.** macOS Gatekeeper will block it on first launch — right-click the app and choose **Open**, or allow it under **System Settings → Privacy & Security**.
+- **Not notarized.** macOS Gatekeeper will block it on first launch. Right-click the app and choose **Open**, or allow it under **System Settings > Privacy & Security**.
 - **Updates are not installed automatically.** The app opens the GitHub release page instead.
 
 ### Downloads
