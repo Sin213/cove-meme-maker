@@ -6,16 +6,16 @@ Drop in your own image, type some text, and export.
 
 ![Cove Meme Maker v2.0.0](assets/screenshot.png)
 
-## Download (v2.3.7)
+## Download (v2.4.0)
 
 | Platform | File |
 | -------- | ---- |
-| Windows (installer) | `cove-meme-maker-2.3.7-Setup.exe` |
-| Windows (portable) | `cove-meme-maker-2.3.7-Portable.exe` |
-| Linux (AppImage) | `Cove-Meme-Maker-2.3.7-x86_64.AppImage` |
-| Linux (Debian / Ubuntu) | `cove-meme-maker_2.3.7_amd64.deb` |
-| macOS 12+ (Apple Silicon, experimental) | `Cove-Meme-Maker-2.3.7-macOS-arm64.zip` |
-| macOS 12+ (Apple Silicon, experimental, disk image) | `Cove-Meme-Maker-2.3.7-macOS-arm64.dmg` |
+| Windows (installer) | `cove-meme-maker-2.4.0-Setup.exe` |
+| Windows (portable) | `cove-meme-maker-2.4.0-Portable.exe` |
+| Linux (AppImage) | `Cove-Meme-Maker-2.4.0-x86_64.AppImage` |
+| Linux (Debian / Ubuntu) | `cove-meme-maker_2.4.0_amd64.deb` |
+| macOS 12+ (Apple Silicon, experimental) | `Cove-Meme-Maker-2.4.0-macOS-arm64.zip` |
+| macOS 12+ (Apple Silicon, experimental, disk image) | `Cove-Meme-Maker-2.4.0-macOS-arm64.dmg` |
 
 Every artifact ships with a matching `.sha256` sidecar. Grab the artifacts
 from the [Releases page](https://github.com/Sin213/cove-meme-maker/releases).
@@ -67,6 +67,35 @@ automatically; the app opens the release page instead.
   Linux AppImage installs swap themselves in place; Windows, `.deb` and
   macOS open the release page for a manual download.
 
+## Cove Nexus (foxy mode)
+
+Cove Meme Maker also ships an embedded web UI that runs inside Cove Nexus.
+When launched in foxy mode the app skips Qt entirely and serves a browser
+tab that talks to the same Pillow rendering engine as the desktop build, so
+a meme built in Nexus exports pixel for pixel identical to one built in the
+desktop app.
+
+- **Classic and Modern styles** with the same top / bottom / caption text
+  fields, per-line colour pickers, ALL CAPS toggle, font picker, and
+  size / stroke / padding sliders as the desktop app.
+- **Live text overlays**: top, bottom and caption text draw directly on the
+  canvas as you type, including the Modern white caption band, so there is
+  no round trip to the server for simple edits.
+- **Image overlays** (new in 2.4.0): the **Add Image** button drops up to 8
+  overlays onto a meme. Each one is draggable, resizable and rotatable on
+  the canvas, with bring-forward / send-back z-order controls and per-overlay
+  delete.
+- **Crop / Frame**: **Enable crop** trims the image before text is applied,
+  and overlay positions follow the crop region, so what you arrange while
+  cropping is what the export shows.
+- **Export PNG** and **Copy to clipboard** both run a full server-side
+  render through the shared `OverlaySpec` path.
+- **Hardened render endpoint**: request bodies, decoded image bytes and
+  pixel counts are capped (10 MB / 16 MP per source image, 5 MB / 16 MP per
+  overlay), base64 input is validated, and a token-bucket rate limiter
+  guards `/render`. Tune it with `COVE_NEXUS_RENDER_RATE_CAPACITY` and
+  `COVE_NEXUS_RENDER_RATE_REFILL`.
+
 ## Formats
 
 | Input | Output |
@@ -99,7 +128,7 @@ PYTHONPATH=src python -m cove_meme_maker
 ### Linux (AppImage + .deb)
 
 ```bash
-VERSION=2.3.7 ./scripts/build-release.sh
+VERSION=2.4.0 ./scripts/build-release.sh
 ```
 
 Produces `Cove-Meme-Maker-<version>-x86_64.AppImage` and
@@ -108,7 +137,7 @@ Produces `Cove-Meme-Maker-<version>-x86_64.AppImage` and
 ### Windows (Setup.exe + Portable.exe)
 
 ```powershell
-.\build.ps1 -Version 2.3.7
+.\build.ps1 -Version 2.4.0
 ```
 
 Requires Python 3.12+ and [Inno Setup 6](https://jrsoftware.org/isdl.php).
