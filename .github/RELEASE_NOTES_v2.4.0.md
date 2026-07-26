@@ -24,7 +24,7 @@ The macOS build is **experimental** and deliberately narrow in scope:
 - **Apple Silicon (arm64) only.** There is no Intel build and no universal2 build.
 - **Not Developer ID signed.** The app is ad-hoc signed only.
 - **Not notarized.** macOS Gatekeeper will block it on first launch. Right-click the app and choose **Open**, or allow it under **System Settings > Privacy & Security**.
-- **Updates are **not** installed automatically.** The app opens the GitHub release page instead.
+- **Updates are not installed automatically.** The app opens the GitHub release page instead.
 
 ### Downloads
 
