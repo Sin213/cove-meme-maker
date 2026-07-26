@@ -26,6 +26,10 @@ import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..image_renderer import OverlaySpec
 
 
 # ---------------------------------------------------------------------------
@@ -46,9 +50,13 @@ def _send_msg(sock: socket.socket, **fields) -> None:
 # /render request and image size limits
 # ---------------------------------------------------------------------------
 
-_MAX_REQUEST_BODY = 20 * 1024 * 1024   # 20 MB — JSON body including base64 image
+_MAX_REQUEST_BODY = 48 * 1024 * 1024   # 48 MB - JSON body: base image + up to 8 base64 overlays
 _MAX_IMAGE_BYTES  = 10 * 1024 * 1024   # 10 MB — decoded image bytes
 _MAX_IMAGE_PIXELS = 4096 * 4096        # 16 MP — source image width × height
+
+_MAX_OVERLAYS       = 8                # most image overlays accepted per /render
+_MAX_OVERLAY_BYTES  = 5 * 1024 * 1024  # 5 MB - decoded bytes per overlay image
+_MAX_OVERLAY_PIXELS = 4096 * 4096      # 16 MP - per-overlay width × height
 
 _SIZE_PCT_MIN =  2.0    # smallest renderable per-block font size (% of image height)
 _SIZE_PCT_MAX = 30.0
@@ -243,6 +251,23 @@ html,body{height:100%;overflow:hidden;font-family:"Geist",Inter,ui-sans-serif,sy
 .crop-btn:disabled{color:#6b6b80;border-color:rgba(255,255,255,0.06);cursor:default}
 .crop-btn.active{color:#50e6cf;border-color:#50e6cf}
 
+/* Image overlays - live DOM mirrors of the server-side overlay compositing.
+   Each .ovl-wrap is centred on the overlay position and rotated around its
+   centre; the <img> fills the wrap width and its height follows the source
+   aspect. Handles and the control cluster only show while selected. */
+#overlay-layer{position:absolute;inset:0;pointer-events:none}
+.ovl-wrap{position:absolute;display:none;pointer-events:none;transform-origin:center center}
+.ovl-img{display:block;width:100%;height:auto;border-radius:2px;pointer-events:auto;cursor:move;user-select:none;-webkit-user-drag:none;touch-action:none}
+.ovl-wrap.selected .ovl-img{outline:1.5px solid #50e6cf;outline-offset:1px}
+.ovl-handle{position:absolute;width:16px;height:16px;background:#50e6cf;border:2px solid #0a0a0e;display:none;pointer-events:auto;user-select:none;touch-action:none;box-shadow:0 1px 4px rgba(0,0,0,0.5)}
+.ovl-wrap.selected .ovl-handle{display:block}
+.ovl-handle-resize{right:-9px;bottom:-9px;border-radius:4px;cursor:nwse-resize}
+.ovl-handle-rotate{left:50%;top:-27px;transform:translateX(-50%);border-radius:50%;cursor:grab}
+.ovl-controls{position:absolute;left:50%;top:100%;margin-top:10px;transform:translateX(-50%);display:none;gap:4px;pointer-events:auto;user-select:none}
+.ovl-wrap.selected .ovl-controls{display:flex}
+.ovl-btn{width:22px;height:22px;padding:0;display:flex;align-items:center;justify-content:center;background:#161620;color:#9a9aae;border:1px solid rgba(255,255,255,0.16);border-radius:5px;font-size:13px;line-height:1;cursor:pointer;font-family:inherit}
+.ovl-btn:hover{color:#ececf1;background:#1c1c28}
+
 #canvas-statusbar{display:flex;align-items:center;gap:8px;padding:0 12px;height:28px;background:rgba(255,255,255,0.012);border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0}
 #status-pulse{width:6px;height:6px;border-radius:3px;background:#3ddc97;flex-shrink:0;transition:background 0.2s}
 #status-msg{font-family:"Geist Mono","JetBrains Mono",ui-monospace,"Cascadia Mono",Menlo,monospace;font-size:10.5px;color:#6b6b80;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -317,6 +342,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
 </head>
 <body>
 <input type="file" id="file-input" accept="image/*" style="display:none">
+<input type="file" id="overlay-file" accept="image/*" style="display:none">
 <div id="app">
 
   <div id="canvas-pane">
@@ -328,6 +354,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     <div id="canvas-toolbar">
       <span id="file-name">No file</span>
       <span id="file-meta"></span>
+      <button class="tb-btn" id="add-image-btn" disabled>Add Image</button>
       <button class="tb-btn" id="clear-btn" disabled>Clear</button>
     </div>
     <div id="canvas-stage">
@@ -338,6 +365,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       </div>
       <div id="preview-wrap">
         <img id="preview-img" alt="">
+        <div id="overlay-layer"></div>
         <div id="top-text-layer" class="text-layer classic"></div>
         <div id="bottom-text-layer" class="text-layer classic"></div>
         <div id="caption-text-layer" class="text-layer caption"></div>
@@ -507,9 +535,11 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   'use strict';
 
   var fileInput   = document.getElementById('file-input');
+  var overlayFile = document.getElementById('overlay-file');
   var fileNameEl  = document.getElementById('file-name');
   var fileMetaEl  = document.getElementById('file-meta');
   var clearBtn    = document.getElementById('clear-btn');
+  var addImageBtn = document.getElementById('add-image-btn');
   var stage       = document.getElementById('canvas-stage');
   var dropZone    = document.getElementById('drop-zone');
   var previewWrap = document.getElementById('preview-wrap');
@@ -565,6 +595,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   var cropReadout   = document.getElementById('crop-readout');
   var cropReadoutTx = document.getElementById('crop-readout-text');
   var aspectSel     = document.getElementById('aspect-sel');
+  var overlayLayer  = document.getElementById('overlay-layer');
   var cropOverlay   = document.getElementById('crop-overlay');
   var cropBox       = document.getElementById('crop-box');
   var cropShadeT    = document.getElementById('crop-shade-t');
@@ -587,6 +618,17 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
   var srcNaturalWidth  = null; // source image natural width in pixels (for readouts)
   var srcNaturalHeight = null; // source image natural height in pixels (for readouts)
   var subDragging  = null; // null | {which:'top'|'bottom', type:'resize'|'rotate', startX, startVal}
+
+  // Image overlay state ("Add Image"). Array order = z-order: later entries
+  // render on top, both here (z-index) and server-side (tuple order).
+  // x, y are the overlay centre normalised to the SOURCE image (same
+  // convention as topPos/bottomPos); width is a fraction of source width
+  // (height follows the image aspect); rotation is clockwise degrees.
+  var overlays        = [];
+  var overlaySeq      = 0;
+  var selectedOverlay = null;
+  var overlayDrag     = null; // null | {id, mode:'move'|'resize'|'rotate', offX, offY}
+  var MAX_OVERLAYS    = 8;    // mirrors server _MAX_OVERLAYS
 
   function setStatus(msg, pulse) {
     statusMsg.textContent = msg;
@@ -644,6 +686,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     previewImg.style.maxHeight = '';
     previewImg.style.transform = '';
     if (cropActive) _updateCropOverlay();
+    _layoutOverlays();
   }
 
   // Approximation of PIL _render_modern: paints a white caption band above
@@ -709,6 +752,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       // Source-normalised cropRect.{x,y,width,height} are untouched; only
       // the screen-space projection is refreshed.
       if (cropActive) _updateCropOverlay();
+      _layoutOverlays();
     });
   }
 
@@ -783,6 +827,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     // still showing the source image — overlays must remain visible there.
     if (showingRenderedPng) {
       _hideAllTextLayers();
+      _layoutOverlays();
       return;
     }
     if (styleMode === 'classic') {
@@ -796,6 +841,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       captionTextLayer.style.display = 'none';
       _layoutModernBand();
     }
+    _layoutOverlays();
   }
 
   // Mark the current editor state dirty relative to lastPng.
@@ -814,6 +860,230 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     }
     updateLiveText();
   }
+
+  // --- Image overlays ("Add Image") ---
+  // Live DOM mirrors of the server-side overlay compositing. Each overlay is
+  // an absolutely positioned wrapper inside #overlay-layer (same coordinate
+  // space as the text layers): centred on (x, y) with width as a fraction of
+  // the displayed source image, rotated around its centre. Like the text
+  // overlays these paint against the original source geometry regardless of
+  // cropActive; _buildRenderPayload() converts to crop-local coordinates.
+  // They are never hidden by Export/Copy (no PIL round-trip reaches the
+  // preview surface there); only showingRenderedPng hides them, exactly like
+  // the text layers, because the baked PNG would otherwise double-draw.
+
+  function _overlayById(id) {
+    for (var i = 0; i < overlays.length; i++) {
+      if (overlays[i].id === id) return overlays[i];
+    }
+    return null;
+  }
+
+  function _layoutOverlay(entry) {
+    var wrap = entry.el;
+    if (!wrap) return;
+    if (!currentDataUrl || showingRenderedPng) { wrap.style.display = 'none'; return; }
+    var imgRect  = previewImg.getBoundingClientRect();
+    var wrapRect = previewWrap.getBoundingClientRect();
+    if (imgRect.width < 1 || imgRect.height < 1) { wrap.style.display = 'none'; return; }
+    wrap.style.display = 'block';
+    wrap.style.left = (imgRect.left - wrapRect.left + entry.x * imgRect.width)  + 'px';
+    wrap.style.top  = (imgRect.top  - wrapRect.top  + entry.y * imgRect.height) + 'px';
+    wrap.style.width = (entry.width * imgRect.width) + 'px';
+    wrap.style.transform = 'translate(-50%, -50%) rotate(' + entry.rotation + 'deg)';
+    wrap.style.zIndex = String(1 + overlays.indexOf(entry));
+    wrap.classList.toggle('selected', entry.id === selectedOverlay);
+    // Keep the control cluster upright regardless of overlay rotation.
+    if (entry.ctl) entry.ctl.style.transform = 'translateX(-50%) rotate(' + (-entry.rotation) + 'deg)';
+  }
+
+  function _layoutOverlays() {
+    overlays.forEach(_layoutOverlay);
+  }
+
+  function _selectOverlay(id) {
+    selectedOverlay = id;
+    overlays.forEach(function (o) {
+      if (o.el) o.el.classList.toggle('selected', o.id === id);
+    });
+  }
+
+  function _resetOverlays() {
+    overlays.forEach(function (o) { if (o.el) o.el.remove(); });
+    overlays = [];
+    selectedOverlay = null;
+    overlayDrag = null;
+  }
+
+  function _onOverlayDragMove(clientX, clientY) {
+    if (!overlayDrag) return;
+    var entry = _overlayById(overlayDrag.id);
+    if (!entry) return;
+    var imgRect = previewImg.getBoundingClientRect();
+    if (imgRect.width < 1 || imgRect.height < 1) return;
+    var px = clientX - imgRect.left;
+    var py = clientY - imgRect.top;
+    if (overlayDrag.mode === 'move') {
+      entry.x = Math.max(0, Math.min(1, px / imgRect.width  - overlayDrag.offX));
+      entry.y = Math.max(0, Math.min(1, py / imgRect.height - overlayDrag.offY));
+    } else if (overlayDrag.mode === 'resize') {
+      // Project the pointer onto the overlay's rotated local x-axis: the
+      // corner handle sits at half the overlay width along that axis, so the
+      // new width is twice the projection length. The centre stays fixed.
+      var th = entry.rotation * Math.PI / 180;
+      var localX = (px - entry.x * imgRect.width)  * Math.cos(th)
+                 + (py - entry.y * imgRect.height) * Math.sin(th);
+      entry.width = Math.max(0.02, Math.min(2.0, 2 * Math.abs(localX) / imgRect.width));
+    } else if (overlayDrag.mode === 'rotate') {
+      // Clockwise degrees from straight-up relative to the overlay centre.
+      var deg = Math.atan2(px - entry.x * imgRect.width,
+                           -(py - entry.y * imgRect.height)) * 180 / Math.PI;
+      entry.rotation = Math.round(Math.max(-180, Math.min(180, deg)));
+    }
+    _markDirty();
+  }
+
+  function _buildOverlayDom(entry) {
+    var wrap = document.createElement('div');
+    wrap.className = 'ovl-wrap';
+
+    var img = document.createElement('img');
+    img.className = 'ovl-img';
+    img.src = entry.dataUrl;
+    img.alt = '';
+    img.draggable = false;
+    wrap.appendChild(img);
+
+    var resizeEl = document.createElement('div');
+    resizeEl.className = 'ovl-handle ovl-handle-resize';
+    wrap.appendChild(resizeEl);
+
+    var rotateEl = document.createElement('div');
+    rotateEl.className = 'ovl-handle ovl-handle-rotate';
+    wrap.appendChild(rotateEl);
+
+    var ctl = document.createElement('div');
+    ctl.className = 'ovl-controls';
+    [
+      { act: 'up',   glyph: '\u2191', label: 'Bring forward' },
+      { act: 'down', glyph: '\u2193', label: 'Send backward' },
+      { act: 'del',  glyph: '\u00d7', label: 'Delete overlay' },
+    ].forEach(function (def) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'ovl-btn';
+      b.setAttribute('data-act', def.act);
+      b.title = def.label;
+      b.textContent = def.glyph;
+      ctl.appendChild(b);
+    });
+    wrap.appendChild(ctl);
+
+    img.addEventListener('pointerdown', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      _selectOverlay(entry.id);
+      var imgRect = previewImg.getBoundingClientRect();
+      if (imgRect.width < 1 || imgRect.height < 1) return;
+      overlayDrag = {
+        id: entry.id, mode: 'move',
+        offX: (e.clientX - imgRect.left) / imgRect.width  - entry.x,
+        offY: (e.clientY - imgRect.top)  / imgRect.height - entry.y,
+      };
+    });
+    resizeEl.addEventListener('pointerdown', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      _selectOverlay(entry.id);
+      overlayDrag = { id: entry.id, mode: 'resize', offX: 0, offY: 0 };
+    });
+    rotateEl.addEventListener('pointerdown', function (e) {
+      e.preventDefault(); e.stopPropagation();
+      _selectOverlay(entry.id);
+      overlayDrag = { id: entry.id, mode: 'rotate', offX: 0, offY: 0 };
+    });
+    ctl.addEventListener('click', function (e) {
+      var act = e.target.getAttribute('data-act');
+      if (!act) return;
+      e.preventDefault(); e.stopPropagation();
+      var i = overlays.indexOf(entry);
+      if (i < 0) return;
+      if (act === 'del') {
+        overlays.splice(i, 1);
+        wrap.remove();
+        entry.el = null;
+        if (selectedOverlay === entry.id) selectedOverlay = null;
+      } else if (act === 'up' && i < overlays.length - 1) {
+        overlays.splice(i, 1);
+        overlays.splice(i + 1, 0, entry);
+      } else if (act === 'down' && i > 0) {
+        overlays.splice(i, 1);
+        overlays.splice(i - 1, 0, entry);
+      }
+      _markDirty();
+    });
+
+    overlayLayer.appendChild(wrap);
+    entry.el = wrap;
+    entry.ctl = ctl;
+  }
+
+  function _addOverlayFromFile(file) {
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      var dataUrl = e.target.result;
+      var probe = new Image();
+      probe.onload = function () {
+        if (!currentDataUrl) return;
+        var entry = {
+          id: ++overlaySeq,
+          dataUrl: dataUrl,
+          x: 0.5, y: 0.5, width: 0.3, rotation: 0,
+          el: null, ctl: null,
+        };
+        overlays.push(entry);
+        _buildOverlayDom(entry);
+        _selectOverlay(entry.id);
+        _markDirty();
+        setStatus('Overlay added');
+      };
+      probe.onerror = function () { setStatus('Not a valid image', '#ff6b6b'); };
+      probe.src = dataUrl;
+    };
+    reader.onerror = function () { setStatus('Could not read file', '#ff6b6b'); };
+    reader.readAsDataURL(file);
+  }
+
+  addImageBtn.addEventListener('click', function () {
+    if (!currentDataUrl || addImageBtn.disabled) return;
+    if (overlays.length >= MAX_OVERLAYS) {
+      setStatus('Overlay limit reached (' + MAX_OVERLAYS + ')', '#ffb454');
+      return;
+    }
+    overlayFile.click();
+  });
+
+  overlayFile.addEventListener('change', function () {
+    var f = overlayFile.files.length ? overlayFile.files[0] : null;
+    overlayFile.value = '';
+    if (!currentDataUrl || !f) return;
+    if (overlays.length >= MAX_OVERLAYS) {
+      setStatus('Overlay limit reached (' + MAX_OVERLAYS + ')', '#ffb454');
+      return;
+    }
+    _addOverlayFromFile(f);
+  });
+
+  window.addEventListener('pointermove', function (e) {
+    if (overlayDrag) _onOverlayDragMove(e.clientX, e.clientY);
+  });
+  window.addEventListener('pointerup',     function () { overlayDrag = null; });
+  window.addEventListener('pointercancel', function () { overlayDrag = null; });
+
+  // Click anywhere outside an overlay deselects it (handles and control
+  // buttons live inside .ovl-wrap, so they keep the selection).
+  stage.addEventListener('pointerdown', function (e) {
+    if (!e.target.closest || !e.target.closest('.ovl-wrap')) _selectOverlay(null);
+  });
 
   function _placeHandle(handle, nx, ny) {
     var imgRect  = previewImg.getBoundingClientRect();
@@ -1231,6 +1501,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
         srcNaturalHeight = img.naturalHeight || null;
         srcNaturalAspect = img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : null;
         clearBtn.disabled  = false;
+        addImageBtn.disabled = false;
         exportBtn.disabled = false;
         copyBtn.disabled   = false;
         dropZone.style.display    = 'none';
@@ -1241,6 +1512,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
         _resetHandles();
         _resetSizeRot();
         _resetCrop();
+        _resetOverlays();
         cropToggleBtn.disabled = false;
         var tok = myLoadToken;
         if (styleMode === 'classic') {
@@ -1282,6 +1554,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     _resetHandles();
     _resetSizeRot();
     _resetCrop();
+    _resetOverlays();
     currentDataUrl = null;
     lastPng = null;
     hasUnrenderedChanges = true;
@@ -1289,6 +1562,7 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
     fileNameEl.textContent = 'No file';
     fileMetaEl.textContent = '';
     clearBtn.disabled  = true;
+    addImageBtn.disabled = true;
     exportBtn.disabled = true;
     copyBtn.disabled   = true;
     previewWrap.style.display = 'none';
@@ -1346,6 +1620,22 @@ select.font-select:focus{border-color:rgba(80,230,207,0.32)}
       top_font:        topFontSel.value,
       bottom_font:     bottomFontSel.value,
       crop: cropActive ? { x: cropRect.x, y: cropRect.y, width: cropRect.width, height: cropRect.height } : null,
+      // Image overlays. x/y are stored source-normalised (like topPos); when
+      // cropActive they convert to crop-local, and width (server-side a
+      // fraction of the post-crop base width) scales by 1/cropRect.width
+      // because the post-crop base is cropRect.width times the source width.
+      overlays: overlays.map(function (o) {
+        var opos = cropActive ? _toCropLocal([o.x, o.y]) : [o.x, o.y];
+        var ow = o.width;
+        if (cropActive) ow = Math.max(0.02, Math.min(2.0, ow / cropRect.width));
+        return {
+          image_b64: o.dataUrl.split(',')[1],
+          x: opos[0],
+          y: opos[1],
+          width: ow,
+          rotation: o.rotation,
+        };
+      }),
     };
   }
 
@@ -1592,6 +1882,85 @@ def _parse_font_id(val: object) -> "tuple[str, ...]":
     return _FONT_IDS.get(val, ())
 
 
+def _parse_overlay_unit(val: object, default: float, label: str) -> float:
+    """Parse a normalised overlay coordinate, mirroring _parse_pos semantics.
+    Returns default when absent. Clamps finite values to [0, 1].
+    Raises ValueError for present-but-malformed input."""
+    if val is None:
+        return default
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be a number")
+    if not math.isfinite(v):
+        raise ValueError(f"{label} must be finite")
+    return max(0.0, min(1.0, v))
+
+
+def _parse_overlay_width(val: object, label: str) -> float:
+    """Parse an overlay width as a fraction of the post-crop base width.
+    Returns 0.3 when absent. Clamps finite values to (0, 2].
+    Raises ValueError for present-but-malformed input."""
+    if val is None:
+        return 0.3
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be a number")
+    if not math.isfinite(v):
+        raise ValueError(f"{label} must be finite")
+    return max(0.01, min(2.0, v))
+
+
+def _parse_overlays(val: object) -> "tuple[OverlaySpec, ...]":
+    """Parse the optional overlays array into a tuple of OverlaySpecs.
+
+    None/absent → empty tuple (no overlays). Raises ValueError for
+    present-but-malformed input: non-array value, more than _MAX_OVERLAYS
+    entries, non-object entries, missing/undecodable/oversize images, or
+    malformed geometry fields. Tuple order is preserved (it defines z-order,
+    later entries render on top). PIL and the renderer are imported lazily,
+    matching the pattern in _handle_render.
+    """
+    if val is None:
+        return ()
+    if not isinstance(val, list):
+        raise ValueError("overlays must be an array")
+    if len(val) > _MAX_OVERLAYS:
+        raise ValueError(f"too many overlays (max {_MAX_OVERLAYS})")
+
+    from PIL import Image
+    from ..image_renderer import OverlaySpec
+
+    specs = []
+    for i, item in enumerate(val):
+        if not isinstance(item, dict):
+            raise ValueError(f"overlays[{i}] must be an object")
+        img_b64 = item.get("image_b64")
+        if not isinstance(img_b64, str) or not img_b64:
+            raise ValueError(f"overlays[{i}]: image_b64 required")
+        try:
+            img_bytes = base64.b64decode(img_b64, validate=True)
+        except Exception as exc:
+            raise ValueError(f"overlays[{i}]: invalid base64: {exc}")
+        if len(img_bytes) > _MAX_OVERLAY_BYTES:
+            raise ValueError(f"overlays[{i}]: overlay image too large")
+        try:
+            ov_img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+        except Exception as exc:
+            raise ValueError(f"overlays[{i}]: unreadable image: {exc}")
+        if ov_img.width * ov_img.height > _MAX_OVERLAY_PIXELS:
+            raise ValueError(f"overlays[{i}]: overlay dimensions too large")
+        specs.append(OverlaySpec(
+            image=ov_img,
+            x=_parse_overlay_unit(item.get("x"), 0.5, f"overlays[{i}].x"),
+            y=_parse_overlay_unit(item.get("y"), 0.5, f"overlays[{i}].y"),
+            width=_parse_overlay_width(item.get("width"), f"overlays[{i}].width"),
+            rotation=_parse_rotation(item.get("rotation")),
+        ))
+    return tuple(specs)
+
+
 def _build_html(run_id: str) -> bytes:
     attr_val = html.escape(run_id, quote=True)
     return _HTML.replace("__RUN_ID_ATTR__", attr_val).encode("utf-8")
@@ -1780,6 +2149,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._json_error(400, f"invalid crop: {exc}")
             return
 
+        # Image overlays - optional array of {image_b64, x, y, width, rotation}.
+        try:
+            overlays = _parse_overlays(req.get("overlays"))
+        except ValueError as exc:
+            self._json_error(400, f"invalid overlays: {exc}")
+            return
+
         # Font IDs — non-string → 400; unknown string → silent default fallback.
         try:
             top_font_names    = _parse_font_id(req.get("top_font"))
@@ -1818,6 +2194,7 @@ class _Handler(BaseHTTPRequestHandler):
                 top_rotation=top_rotation,
                 bottom_rotation=bottom_rotation,
                 crop=crop,
+                overlays=overlays,
             )
             result = _render(source, spec)
             buf = io.BytesIO()

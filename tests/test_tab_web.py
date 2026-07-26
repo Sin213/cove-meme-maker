@@ -11,6 +11,8 @@ Covers the properties the desktop app and the smoke test depend on:
 * the ``modern`` style routes through ``_render_modern`` (caption band) and is
   never silently downgraded to ``classic``.
 """
+import base64
+import io
 import json
 import os
 import socket
@@ -18,7 +20,11 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 SRC_DIR = str(Path(__file__).resolve().parents[1] / "src")
@@ -27,6 +33,7 @@ sys.path.insert(0, SRC_DIR)
 from PIL import Image  # noqa: E402
 
 from cove_meme_maker.image_renderer import MemeSpec, render  # noqa: E402
+import cove_meme_maker.tab_web as tab_web  # noqa: E402
 from cove_meme_maker.tab_web import (  # noqa: E402
     _RenderRateLimiter,
     _rate_limit_params,
@@ -229,6 +236,141 @@ class ModernStylePathTest(unittest.TestCase):
         self.assertIsNotNone(colors)
         # More than just the white band + solid source → text pixels present.
         self.assertGreater(len(colors), 2, "modern caption produced no text pixels")
+
+
+class TabWebOverlayRenderTest(unittest.TestCase):
+    """HTTP-level /render tests for the "Add Image" overlay port.
+
+    Spins up an in-process ThreadingHTTPServer with the real handler and a
+    high-capacity token bucket so request bursts are never throttled.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved_limiter = tab_web._render_rate_limiter
+        tab_web._render_rate_limiter = _RenderRateLimiter(100000.0, 100000.0)
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), tab_web._Handler)
+        cls._thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls._thread.start()
+        cls._url = f"http://127.0.0.1:{cls.httpd.server_address[1]}/render"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        tab_web._render_rate_limiter = cls._saved_limiter
+
+    @staticmethod
+    def _png_b64(color, size=(64, 64)) -> str:
+        buf = io.BytesIO()
+        Image.new("RGB", size, color).save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def _post(self, payload: dict) -> "tuple[int, dict]":
+        req = urllib.request.Request(
+            self._url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode("utf-8"))
+
+    def _render_ok(self, payload: dict) -> Image.Image:
+        status, data = self._post(payload)
+        self.assertEqual(status, 200, f"render failed: {data}")
+        raw = base64.b64decode(data["preview_b64"])
+        self.assertEqual(raw[:8], b"\x89PNG\r\n\x1a\n", "response is not a PNG")
+        return Image.open(io.BytesIO(raw)).convert("RGB")
+
+    def test_single_overlay_changes_output(self):
+        base = self._png_b64((20, 120, 200))
+        ovl = self._png_b64((255, 0, 0))
+        plain = self._render_ok({"image_b64": base})
+        with_ovl = self._render_ok({
+            "image_b64": base,
+            "overlays": [{"image_b64": ovl, "x": 0.5, "y": 0.5, "width": 0.5}],
+        })
+        self.assertEqual(plain.size, with_ovl.size)
+        self.assertNotEqual(plain.tobytes(), with_ovl.tobytes(),
+                            "overlay render must differ from no-overlay render")
+        self.assertEqual(with_ovl.getpixel((32, 32)), (255, 0, 0),
+                         "overlay colour must appear at the base centre")
+
+    def test_later_overlay_wins_at_overlap(self):
+        base = self._png_b64((20, 120, 200))
+        red = self._png_b64((255, 0, 0))
+        blue = self._png_b64((0, 0, 255))
+
+        def _stacked(first_b64, second_b64):
+            return self._render_ok({
+                "image_b64": base,
+                "overlays": [
+                    {"image_b64": first_b64, "x": 0.5, "y": 0.5, "width": 0.5},
+                    {"image_b64": second_b64, "x": 0.5, "y": 0.5, "width": 0.5},
+                ],
+            })
+
+        self.assertEqual(_stacked(red, blue).getpixel((32, 32)), (0, 0, 255),
+                         "later overlay must render on top")
+        self.assertEqual(_stacked(blue, red).getpixel((32, 32)), (255, 0, 0),
+                         "reversing the order must reverse the overlap colour")
+
+    def test_rotation_90_differs_from_rotation_0(self):
+        base = self._png_b64((20, 120, 200))
+        # Non-square overlay: rotation visibly changes the footprint.
+        ovl = self._png_b64((255, 0, 0), size=(64, 32))
+
+        def _rot(deg):
+            return self._render_ok({
+                "image_b64": base,
+                "overlays": [{"image_b64": ovl, "x": 0.5, "y": 0.5,
+                              "width": 0.5, "rotation": deg}],
+            })
+
+        r0 = _rot(0)
+        r90 = _rot(90)
+        self.assertNotEqual(r0.tobytes(), r90.tobytes(),
+                            "rotation=90 must differ from rotation=0")
+
+    def test_invalid_overlays_rejected(self):
+        base = self._png_b64((20, 120, 200))
+        ovl = self._png_b64((255, 0, 0))
+
+        status, data = self._post({"image_b64": base, "overlays": "not-a-list"})
+        self.assertEqual(status, 400, f"non-array overlays must 400: {data}")
+
+        status, data = self._post({
+            "image_b64": base,
+            "overlays": [{"image_b64": ovl} for _ in range(9)],
+        })
+        self.assertEqual(status, 400, f"9 overlays must 400: {data}")
+
+        status, data = self._post({
+            "image_b64": base,
+            "overlays": [{"image_b64": "!!!notbase64!!!"}],
+        })
+        self.assertEqual(status, 400, f"invalid overlay base64 must 400: {data}")
+
+        status, data = self._post({
+            "image_b64": base,
+            "overlays": [{"x": 0.5, "y": 0.5}],
+        })
+        self.assertEqual(status, 400, f"missing image_b64 must 400: {data}")
+
+    def test_overlay_position_boundaries_accepted(self):
+        """x/y at (0,0) and (1,1) must render fine (renderer does not clamp
+        beyond the [0,1] input validation)."""
+        base = self._png_b64((20, 120, 200))
+        ovl = self._png_b64((255, 0, 0))
+        for x, y in ((0.0, 0.0), (1.0, 1.0)):
+            status, data = self._post({
+                "image_b64": base,
+                "overlays": [{"image_b64": ovl, "x": x, "y": y, "width": 0.3}],
+            })
+            self.assertEqual(status, 200, f"overlay at ({x}, {y}) must 200: {data}")
 
 
 if __name__ == "__main__":
