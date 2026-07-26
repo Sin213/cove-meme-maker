@@ -1,4 +1,4 @@
-"""Deterministic contracts for the v2.3.7 release candidate.
+"""Deterministic contracts for the v2.4.0 release candidate.
 
 Two classes of regression are covered:
 
@@ -26,7 +26,7 @@ BUILD_LINUX = REPO_ROOT / "scripts" / "build-release.sh"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 NOTES_DIR = REPO_ROOT / ".github"
 
-TARGET_VERSION = "2.3.7"
+TARGET_VERSION = "2.4.0"
 
 
 def _canonical_version() -> str:
